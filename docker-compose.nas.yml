@@ -1,0 +1,96 @@
+# essersales Phase 4 — NAS production Docker Compose
+# Vue dist + PG API + PostgreSQL + nginx reverse proxy
+#
+# Prereq:
+#   npm run build:production
+#   copy .env.production.example → .env  (set POSTGRES_PASSWORD)
+#
+# Start:
+#   docker compose -f docker-compose.nas.yml up -d --build
+#
+# Access:
+#   http://NAS_IP:8080/          → Vue frontend
+#   http://NAS_IP:8080/api/v1/health → API health
+
+name: essersales-nas
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-essersales}
+      POSTGRES_USER: ${POSTGRES_USER:-essersales}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./infra/db/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-essersales} -d ${POSTGRES_DB:-essersales}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - internal
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_PORT: 3001
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-essersales}
+      DB_USER: ${DB_USER:-essersales}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      UPLOAD_DIR: /app/data/uploads
+      EXPORT_DIR: /app/data/exports
+      MIGRATIONS_DIR: /app/infra/db
+    volumes:
+      - ./data/uploads:/app/data/uploads
+      - ./data/exports:/app/data/exports
+      - ./data/backups:/app/data/backups
+      - ./infra/db:/app/infra/db:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - internal
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./infra/nginx/nas.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

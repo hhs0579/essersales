@@ -1,0 +1,56 @@
+{
+  "name": "essersales",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0 <24.0.0"
+  },
+  "scripts": {
+    "preinstall": "node -e \"if(process.env.NODE_ENV==='production'&&!process.env.npm_config_production){console.warn('[essersales] devDependencies 필요: npm install 시 NODE_ENV=production 제거')}\"",
+    "dev": "node scripts/check-node.js && npx vite",
+    "dev:pg": "node scripts/check-node.js && node infra/scripts/vite-pglocal-server.mjs 5173",
+    "build": "vite build",
+    "build:production": "vite build --mode production",
+    "preview": "node scripts/check-node.js && vite preview",
+    "api": "docker compose up -d --build api db",
+    "nas:up": "docker compose -f docker-compose.nas.yml up -d --build",
+    "nas:down": "docker compose -f docker-compose.nas.yml down",
+    "verify:production-compose": "node infra/scripts/verify-production-compose.mjs",
+    "prepare:phase5-local": "node infra/scripts/prepare-phase5-local.mjs",
+    "backup:sqlite": "node infra/scripts/backup-sqlite.mjs",
+    "migrate:pg:dry-run": "node infra/scripts/migrate-sqlite-to-pg.mjs --dry-run",
+    "migrate:pg": "node infra/scripts/migrate-sqlite-to-pg.mjs --execute",
+    "verify:pg": "node infra/scripts/verify-pg-migration.mjs",
+    "compare:read-api": "node infra/scripts/compare-sqlite-pg-read-api.mjs",
+    "regression:phase-1-5": "node infra/scripts/phase-1-5-regression.mjs",
+    "regression:phase-2-1": "node infra/scripts/phase-2-1-kpi-api-regression.mjs",
+    "regression:phase-2-2": "node infra/scripts/phase-2-2-kpi-api-regression.mjs",
+    "regression:phase-2-3": "node infra/scripts/phase-2-3-lazy-manual-ads-regression.mjs",
+    "regression:phase-2-4": "node infra/scripts/phase-2-4-settings-write-regression.mjs",
+    "regression:phase-2-5": "node infra/scripts/phase-2-5-record-upload-write-regression.mjs",
+    "regression:phase-3-1": "node infra/scripts/phase-3-1-upload-pg-regression.mjs",
+    "regression:phase-3-2": "node infra/scripts/phase-3-2-export-pg-regression.mjs",
+    "regression:phase-3-3": "node infra/scripts/phase-3-3-full-pg-e2e-regression.mjs",
+    "regression:phase-3-4a": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs",
+    "regression:full-pg": "node infra/scripts/regression-full-pg.mjs",
+    "smoke:phase-3-4a": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs",
+    "smoke:full-pg": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1",
+    "exceljs": "^4.4.0",
+    "pg": "^8.13.1",
+    "vue": "^3.5.13",
+    "vue-chartjs": "^5.3.3",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "better-sqlite3": "^11.10.0",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "playwright": "^1.52.0",
+    "vite": "^6.0.3"
+  }
+}
