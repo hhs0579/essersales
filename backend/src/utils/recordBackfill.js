@@ -77,6 +77,10 @@ export function mapSalesRecordBackfill(data, upload = null) {
 
   const businessDate = orderDate || periodFrom || upload?.business_date || null
 
+  const uploadKind = coalesceStr(data.uploadKind, upload?.upload_kind)
+  const isClosedMall =
+    uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall'
+
   return {
     order_date: orderDate,
     business_date: businessDate,
@@ -85,7 +89,12 @@ export function mapSalesRecordBackfill(data, upload = null) {
     platform: coalesceStr(data.platform, data.channel, upload?.platform),
     sales_method: coalesceStr(data.salesMethod, data.sales_type, upload?.sales_method),
     channel: coalesceStr(data.channel, data.platform),
-    store_name: coalesceStr(data.brand, data.storeName, data.store_name),
+    store_name: coalesceStr(
+      data.storeName,
+      data.store_name,
+      data.closedMallSeller,
+      isClosedMall ? '' : data.brand,
+    ),
     product_code: coalesceStr(data.productCode, data.product_code),
     product_name: coalesceStr(data.productName, data.product_name),
     option_name: coalesceStr(data.option, data.optionName, data.option_name),

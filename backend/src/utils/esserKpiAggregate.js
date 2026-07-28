@@ -2,9 +2,77 @@
  * KPI 집계 — Vue esserMetrics / platformKpiSplit / dayOverDaySales 규칙 포팅
  */
 
-const MARKETPLACE_PLATFORMS = ['쿠팡', '스마트스토어', '네이버', '자사몰']
+const MARKETPLACE_PLATFORMS = ['쿠팡', '스마트스토어', '네이버', '자사몰', '특판 폐쇄몰']
 const PLATFORM_SPLIT_LABELS = ['쿠팡', '스마트스토어', '자사몰']
 const DAY_OVER_DAY_LABELS = ['쿠팡', '스마트스토어', '합계']
+
+function isClosedMallRow(row) {
+  const data = row?.data && typeof row.data === 'object' ? row.data : {}
+  const kind = String(row?.upload_kind || row?.uploadKind || data.uploadKind || '').trim()
+  if (kind === 'bestheim_closed_mall' || kind === 'esser_closed_mall') return true
+  const format = String(row?.upload_format || row?.uploadFormat || data.uploadFormat || '').trim()
+  if (format === 'BESTHEIM_CLOSED_MALL' || format === 'ESSER_CLOSED_MALL') return true
+  const platform = normalizePlatformLabel(row?.platform || data.platform || '')
+  return platform === '특판 폐쇄몰'
+}
+
+function resolveClosedMallSeller(row) {
+  const data = row?.data && typeof row.data === 'object' ? row.data : {}
+  return String(
+    row?.store_name ||
+      row?.storeName ||
+      data.storeName ||
+      data.closedMallSeller ||
+      data.seller ||
+      '',
+  ).trim()
+}
+
+function resolveClosedMallBrandLabel(row) {
+  const data = row?.data && typeof row.data === 'object' ? row.data : {}
+  const kind = String(row?.upload_kind || row?.uploadKind || data.uploadKind || '').trim()
+  if (kind === 'esser_closed_mall' || data.uploadFormat === 'ESSER_CLOSED_MALL') return '에쎄르'
+  if (kind === 'bestheim_closed_mall' || data.uploadFormat === 'BESTHEIM_CLOSED_MALL') {
+    return '베스트하임'
+  }
+  const tagged = String(data.dataSourceLabel || '').trim()
+  if (tagged === '에쎄르' || tagged === '베스트하임') return tagged
+  return '베스트하임'
+}
+
+/** 대시보드 행 라벨: 브랜드(판매처) */
+function formatClosedMallKpiLabel(brandLabel, seller) {
+  const brand = String(brandLabel || '').trim() || '특판'
+  const name = String(seller || '').trim() || '특판'
+  return `${brand}(${name})`
+}
+
+function isClosedMallKpiLabel(label) {
+  const s = String(label || '').trim()
+  if (s === '특판 폐쇄몰' || s === '베스트하임(특판 폐쇄몰)') return true
+  if (/^베스트하임 \(.+\)$/.test(s)) return true
+  return /^(에쎄르|베스트하임)\(.+\)$/.test(s)
+}
+
+function closedMallSellerFromLabel(label) {
+  const s = String(label || '').trim()
+  const spaced = s.match(/^베스트하임 \((.+)\)$/)
+  if (spaced) return spaced[1].trim()
+  const m = s.match(/^(?:에쎄르|베스트하임)\((.+)\)$/)
+  return m ? m[1].trim() : ''
+}
+
+function listClosedMallSellerLabels(rows, range = {}) {
+  const labels = new Set()
+  for (const row of productRows(rows)) {
+    if (!isClosedMallRow(row)) continue
+    if (!rowMatchesKpiDateRange(row, range)) continue
+    const seller = resolveClosedMallSeller(row)
+    const brand = resolveClosedMallBrandLabel(row)
+    labels.add(formatClosedMallKpiLabel(brand, seller))
+  }
+  return [...labels].sort((a, b) => a.localeCompare(b, 'ko'))
+}
 
 function parseAmount(val) {
   if (val == null || val === '') return 0
@@ -366,9 +434,26 @@ function platformRowCountRows(rows) {
   return (rows || []).filter((r) => !isSheetTotal(r))
 }
 
+function closedMallBrandFromLabel(label) {
+  const s = String(label || '').trim()
+  if (/^베스트하임 \(.+\)$/.test(s) || /^베스트하임\(.+\)$/.test(s)) return '베스트하임'
+  if (/^에쎄르\(.+\)$/.test(s)) return '에쎄르'
+  return ''
+}
+
 function platformSubset(rows, label) {
   const list = productRows(rows)
   if (label === '합계') return list
+  if (isClosedMallKpiLabel(label)) {
+    const seller = closedMallSellerFromLabel(label)
+    const brand = closedMallBrandFromLabel(label)
+    return list.filter((r) => {
+      if (!isClosedMallRow(r)) return false
+      if (brand && resolveClosedMallBrandLabel(r) !== brand) return false
+      if (!seller) return true
+      return resolveClosedMallSeller(r) === seller
+    })
+  }
   return list.filter((r) => resolvePlatformFromRow(r) === label)
 }
 
@@ -479,10 +564,51 @@ export function aggregatePlatformKpiFromRows(rows, range = {}) {
     return finalizeBucket({ platform: label, ...emptyBucket(), recordCount: count })
   })
 
+  // 특판 폐쇄몰 → 판매처별 「브랜드(판매처)」 행
+  const closedMetrics = new Map()
+  const closedCounts = new Map()
+  for (const row of productRows(rows)) {
+    if (!isClosedMallRow(row)) continue
+    if (!rowMatchesKpiDateRange(row, range)) continue
+    const label = formatClosedMallKpiLabel(
+      resolveClosedMallBrandLabel(row),
+      resolveClosedMallSeller(row),
+    )
+    if (!closedMetrics.has(label)) {
+      closedMetrics.set(label, { platform: label, ...emptyBucket() })
+    }
+    addMetricsToBucket(closedMetrics.get(label), rowMetrics(row))
+  }
+  for (const row of platformRowCountRows(rows)) {
+    if (!isClosedMallRow(row)) continue
+    if (!rowMatchesKpiDateRange(row, range)) continue
+    const label = formatClosedMallKpiLabel(
+      resolveClosedMallBrandLabel(row),
+      resolveClosedMallSeller(row),
+    )
+    closedCounts.set(label, (closedCounts.get(label) || 0) + 1)
+  }
+  const closedItems = [...closedMetrics.keys()]
+    .sort((a, b) => a.localeCompare(b, 'ko'))
+    .map((label) =>
+      finalizeBucket({
+        ...closedMetrics.get(label),
+        recordCount: closedCounts.get(label) || 0,
+      }),
+    )
+
+  // 베스트하임(플랫폼): 특판 제외 / 기타 판매처: 특판만
+  const hasNonClosedInRange = productRows(rows).some(
+    (r) => rowMatchesKpiDateRange(r, range) && !isClosedMallRow(r),
+  )
+  const resultItems = hasNonClosedInRange
+    ? main
+    : closedItems.length
+      ? closedItems
+      : main
+
   const total = emptyBucket()
-  for (const label of PLATFORM_SPLIT_LABELS) {
-    const item = main.find((i) => i.platform === label)
-    if (!item) continue
+  for (const item of resultItems) {
     total.salesTotal += item.salesTotal
     total.quantityTotal += item.quantityTotal
     total.recordCount += item.recordCount
@@ -494,7 +620,7 @@ export function aggregatePlatformKpiFromRows(rows, range = {}) {
   finalizeBucket(total)
 
   return {
-    items: main,
+    items: resultItems,
     total: finalizeBucket({ platform: '합계', ...total }),
     allItems: items,
   }
@@ -509,7 +635,14 @@ export function compareYesterdayFromRows(rows, opts = {}) {
   const prev = ref ? addDaysToYmd(ref, -1) : ''
   const labels = opts.platform
     ? [opts.platform === '합계' ? '합계' : normalizePlatformLabel(opts.platform)]
-    : DAY_OVER_DAY_LABELS
+    : (() => {
+        const closed = listClosedMallSellerLabels(rows, {})
+        const products = productRows(rows)
+        const onlyClosed =
+          products.length > 0 && products.every((r) => isClosedMallRow(r))
+        if (onlyClosed) return [...closed, '합계']
+        return ['쿠팡', '스마트스토어', '합계']
+      })()
 
   const items = labels.map((label) => {
     const salesByDay = buildDailySalesMap(rows, label)

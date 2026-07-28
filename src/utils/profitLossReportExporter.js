@@ -23,7 +23,10 @@ import {
   summarizeBrandKpis,
   COMBINED_BRAND_KPI_LABELS,
 } from './platformKpiSplit.js'
-import { resolveRecordSourceLabel } from './recordSourceLabel.js'
+import {
+  resolveRecordSourceLabel,
+  resolveCombinedBrandRollupLabel,
+} from './recordSourceLabel.js'
 import { MANUAL_AD_SOURCE_DEFS, isManualAdKpiLabel } from '../config/manualAdSpend.js'
 import { isPowerPriceRecord } from '../config/powerPrice.js'
 import { isReturnRecord } from './transactionType.js'
@@ -665,7 +668,7 @@ function inferSourceLabel(row) {
 }
 
 function filterRecordsBySourceLabel(records, sourceLabel) {
-  return (records || []).filter((r) => resolveRecordSourceLabel(r) === sourceLabel)
+  return (records || []).filter((r) => resolveCombinedBrandRollupLabel(r) === sourceLabel)
 }
 
 function manualEntriesForBrand(channelGroups, brand) {

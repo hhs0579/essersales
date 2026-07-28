@@ -30,6 +30,13 @@ export async function processExcelUpload({ buffer, fileName, fields }) {
   )
 
   const sha256 = sha256Buffer(buffer)
+  const isClosedMall =
+    uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall'
+
+  // 폐쇄몰: 파일명 교체 후 지문 조회가 맞도록 파싱 전에 동일 파일명 삭제
+  if (isClosedMall && replaceSameName) {
+    await deleteUploadsByFileName(fileName, uploadKind)
+  }
 
   if (!force) {
     const dup = await findDuplicateUpload(sha256, uploadKind)
@@ -60,7 +67,7 @@ export async function processExcelUpload({ buffer, fileName, fields }) {
     throw e
   }
 
-  if (replaceSameName && uploadKind !== 'sales_report') {
+  if (replaceSameName && uploadKind !== 'sales_report' && !isClosedMall) {
     await deleteUploadsByFileName(fileName, uploadKind)
   }
 

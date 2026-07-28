@@ -7,22 +7,26 @@ import { aggregateEsserByDayWithManual } from './manualAdSpend.js'
 import { formatEsserValue } from './esserMetrics.js'
 import {
   DAY_OVER_DAY_BRAND_LABELS,
-  resolveRecordSourceLabel,
+  resolveCombinedBrandRollupLabel,
   withRecordSourceLabel,
 } from './recordSourceLabel.js'
 import {
   COMBINED_DAY_OVER_DAY_LABELS,
+  combinedDayOverDayLabelsForRecords,
+  closedMallKpiLabelsFromRecords,
   recordsForCombinedSegmentLabel,
 } from './combinedKpiSegments.js'
+import { isClosedMallKpiLabel, isClosedMallRecord, OTHER_SELLERS_BRAND_LABEL } from '../config/closedMall.js'
 
 export { DAY_OVER_DAY_BRAND_LABELS } from './recordSourceLabel.js'
 export { COMBINED_DAY_OVER_DAY_LABELS } from './combinedKpiSegments.js'
 
-/** 통합 ①요약리포트·전일대비 — 브랜드 3개 + 합계 (세그먼트 합산) */
+/** 통합 ①요약리포트·전일대비 — 브랜드 + 기타 판매처 + 합계 */
 export const COMBINED_BRAND_DAY_OVER_DAY_LABELS = [
   '베스트하임',
   '사본느리',
   '파워프라이스',
+  OTHER_SELLERS_BRAND_LABEL,
   '합계',
 ]
 
@@ -176,17 +180,30 @@ function tagSourceLabels(rows) {
 function platformSubset(rows, label) {
   const list = filterSaleProductRows(rows)
   if (label === '합계') return list
+  if (isClosedMallKpiLabel(label)) {
+    return filterSaleProductRows(recordsForCombinedSegmentLabel(rows, label))
+  }
   return list.filter((r) => resolveRecordPlatform(r) === label)
+}
+
+/** 전일대비 라벨 — 기타 판매처(특판만) vs 베스트하임(마켓플레이스) */
+function dayOverDayLabelsForRows(rows) {
+  const products = filterSaleProductRows(rows)
+  const closed = closedMallKpiLabelsFromRecords(rows)
+  const onlyClosed = products.length > 0 && products.every((r) => isClosedMallRecord(r))
+  if (onlyClosed) return [...closed, '합계']
+  return ['쿠팡', '스마트스토어', '합계']
 }
 
 function brandSubset(rows, label) {
   const list = filterSaleProductRows(rows)
   if (label === '합계') return list
-  return list.filter((r) => resolveRecordSourceLabel(r) === label)
+  return list.filter((r) => resolveCombinedBrandRollupLabel(r) === label)
 }
 
 function manualCtxForPlatform(baseCtx, label) {
   if (label === '합계') return { ...baseCtx, platform: '' }
+  if (isClosedMallKpiLabel(label)) return { ...baseCtx, platform: '특판 폐쇄몰' }
   return { ...baseCtx, platform: label }
 }
 
@@ -444,7 +461,7 @@ export function computeDayOverDaySales(rows, options = {}) {
     specialSaleByMonth,
   })
 
-  return DAY_OVER_DAY_PLATFORM_LABELS.map((platform) => {
+  return dayOverDayLabelsForRows(salesRows).map((platform) => {
     const salesByDay = buildDailySalesMap(
       salesRows,
       manualAdEntries,
@@ -494,7 +511,8 @@ export function computeCombinedSegmentDayOverDaySales(rows, options = {}) {
   const salesRows = tagSourceLabels(lookupRows?.length ? lookupRows : rows)
   const ctx = resolveComparisonContext(manualFilterCtx, referenceDateKey, rows)
 
-  return COMBINED_DAY_OVER_DAY_LABELS.map((label) => {
+  const labels = combinedDayOverDayLabelsForRecords(salesRows)
+  return labels.map((label) => {
     const subset = recordsForCombinedSegmentLabel(salesRows, label)
     const salesByDay = buildSegmentDailySalesMap(subset)
     return buildDayOverDayResult(label, salesByDay, ctx.ref, ctx.prev, ctx.buildOptions)

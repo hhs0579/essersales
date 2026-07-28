@@ -17,7 +17,7 @@ export const STANDARD_COLUMNS = [
   { key: 'remarks', label: '비고', description: '매핑 오류, 확인 필요 사항' },
 ]
 
-export const CHANNELS = ['쿠팡', '스마트스토어', '자사몰']
+export const CHANNELS = ['쿠팡', '스마트스토어', '자사몰', '특판 폐쇄몰']
 
 export const STANDARD_KEYS = STANDARD_COLUMNS.map((c) => c.key)
 

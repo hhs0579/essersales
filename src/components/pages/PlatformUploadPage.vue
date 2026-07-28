@@ -10,6 +10,7 @@ import PlatformMonthlyUpload from '../PlatformMonthlyUpload.vue'
 import PowerPricePanel from '../PowerPricePanel.vue'
 import Coupang1pRocketPanel from '../Coupang1pRocketPanel.vue'
 import OwnMallManualPanel from '../OwnMallManualPanel.vue'
+import ClosedMallUpload from '../ClosedMallUpload.vue'
 
 import UploadHistoryList from '../UploadHistoryList.vue'
 
@@ -25,10 +26,15 @@ import {
 
   isManualOnlyChannel,
 
+  isClosedMallChannel,
+
 } from '../../config/dataChannels.js'
+import { CLOSED_MALL_BRANDS, getClosedMallBrand } from '../../config/closedMall.js'
 
 import { useSalesData } from '../../composables/useSalesData.js'
 import { defaultReportDateRange } from '../../utils/reportDateRange.js'
+
+const closedMallBrandKey = ref('esser')
 
 
 
@@ -151,6 +157,9 @@ function apiFor(channelId, modeId = activeUploadMode.value) {
 
 
 function channelUploads(channelId, modeId = activeUploadMode.value) {
+  if (isClosedMallChannel(channelId)) {
+    return closedMallUploadsForBrand(closedMallBrandKey.value)
+  }
 
   const kind = getMode(channelId, modeId).uploadKind
 
@@ -160,6 +169,21 @@ function channelUploads(channelId, modeId = activeUploadMode.value) {
 
     .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
 
+}
+
+/** 기타 판매처 · 브랜드별 업로드 이력 */
+function closedMallUploadsForBrand(brandKey) {
+  const def = getClosedMallBrand(brandKey)
+  if (!def) return []
+  return uploadsForChannel('channel_e')
+    .filter((u) => u.uploadKind === def.uploadKind)
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+}
+
+function selectClosedMallUploadsForBrand(brandKey) {
+  const api = apiFor('channel_e', 'daily')
+  const ids = closedMallUploadsForBrand(brandKey).map((u) => u.id)
+  api.selectedUploadIds.value = ids
 }
 
 
@@ -182,9 +206,21 @@ onMounted(async () => {
 
 
 
-async function handleUploaded(channelId, modeId) {
+async function handleUploaded(channelId, modeId, opts = {}) {
 
   await onDataChannelUploaded(scopeFor(channelId, modeId))
+
+  // 특판 폐쇄몰 업로드 후 선택에 포함되어야 대시보드(특히 통합)에 바로 반영됨
+  if (opts.closedMall) {
+    const api = apiFor(channelId, modeId)
+    const brandKey = opts.brand || closedMallBrandKey.value
+    const closedIds = closedMallUploadsForBrand(brandKey).map((u) => u.id)
+    if (api.selectedUploadIds.value.length) {
+      const set = new Set(api.selectedUploadIds.value)
+      for (const id of closedIds) set.add(id)
+      api.selectedUploadIds.value = [...set]
+    }
+  }
 
 }
 
@@ -331,7 +367,7 @@ function goDashboard() {
 
       <p class="standard-ref tab-desc">
 
-        <template v-if="ch.manualOnly">{{ ch.description }}</template>
+        <template v-if="ch.manualOnly || isClosedMallChannel(ch.id)">{{ ch.description }}</template>
 
         <template v-else-if="activeUploadMode === 'monthly'">
 
@@ -367,7 +403,57 @@ function goDashboard() {
         :filter-ctx="panelFilterCtx"
       />
 
+      <template v-else-if="isClosedMallChannel(ch.id)">
+        <div class="inner-tabs closed-mall-brand-tabs" role="tablist">
+          <button
+            v-for="b in CLOSED_MALL_BRANDS"
+            :key="b.key"
+            type="button"
+            class="inner-tab"
+            :class="{ active: closedMallBrandKey === b.key }"
+            role="tab"
+            :aria-selected="closedMallBrandKey === b.key"
+            @click="closedMallBrandKey = b.key"
+          >
+            {{ b.tabLabel }}
+          </button>
+        </div>
 
+        <ClosedMallUpload
+          :brand="closedMallBrandKey"
+          @uploaded="
+            (p) =>
+              handleUploaded(ch.id, 'daily', {
+                closedMall: true,
+                brand: p?.brand || closedMallBrandKey,
+              })
+          "
+        />
+
+        <div class="upload-history-block closed-mall-history">
+          <h3 class="section-subtitle">
+            업로드된 파일 · 특판 폐쇄몰 ·
+            {{ getClosedMallBrand(closedMallBrandKey)?.tabLabel }}
+          </h3>
+          <p class="standard-ref history-hint">
+            체크한 파일만
+            <strong>매출 대시보드 → 기타 판매처</strong>
+            · 통합에 반영됩니다. 삭제하면 해당 파일 데이터도 함께 제거됩니다.
+          </p>
+          <UploadHistoryList
+            :uploads="closedMallUploadsForBrand(closedMallBrandKey)"
+            :selected-upload-ids="selectedIdsFor(ch.id, 'daily')"
+            :saving="saving"
+            :page-size="10"
+            :empty-text="`「${getClosedMallBrand(closedMallBrandKey)?.tabLabel}」 특판 폐쇄몰 업로드가 없습니다.`"
+            @toggle="apiFor(ch.id, 'daily').toggleUploadSelection"
+            @select-all="selectClosedMallUploadsForBrand(closedMallBrandKey)"
+            @clear-selection="apiFor(ch.id, 'daily').clearUploadSelection"
+            @merge-download="apiFor(ch.id, 'daily').downloadMergedExcel"
+            @delete="onDeleteUpload"
+          />
+        </div>
+      </template>
 
       <template v-else>
 
@@ -446,7 +532,6 @@ function goDashboard() {
             @delete="onDeleteUpload"
 
           />
-
         </div>
 
       </template>

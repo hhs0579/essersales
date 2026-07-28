@@ -3,6 +3,7 @@ import { filterKpiCards, COMBINED_HIDDEN_KPI_KEYS } from '../config/combinedChan
 import {
   buildKpiSplitRowsForChannel,
   kpiSplitSectionTitle,
+  filterKpiRowsWithAdSpend,
   isExternalAdKpiNA,
   isPowerPriceKpiNA,
   isSpecialSaleKpiNA,
@@ -83,10 +84,12 @@ export function buildIntegratedSegmentKpiExcelRows(
   }
   rows.push([])
 
+  // 통합 광고·판매량 — 광고비 0원 행 제외 (웹 대시보드와 동일)
+  const adRows = filterKpiRowsWithAdSpend(splitRows)
   const adCards = filterKpiCards(ESSER_AD_KPI_CARDS, hiddenKpiKeys)
-  rows.push([`■ ${kpiSplitSectionTitle(splitRows, 'ad', { compact: true })}`])
+  rows.push([`■ ${kpiSplitSectionTitle(adRows, 'ad', { compact: true })}`])
   rows.push(['구분', ...adCards.map((c) => c.label)])
-  for (const row of splitRows) {
+  for (const row of adRows) {
     rows.push([
       row.label,
       ...adCards.map((c) =>

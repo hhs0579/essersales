@@ -730,12 +730,18 @@ async function ensureDashboardReady(scope) {
     error.value = ''
     try {
       await loadServerKpiForScope(scope)
+      // 통합·기타 판매처 세그먼트(특판 폐쇄몰 판매처 행)는 클라이언트 상세가 필요
+      if (isCombinedScope(scope) || scope === 'other_sellers') {
+        await ensureDetailCache()
+        await loadRecordsForScope(scope, { silent: true })
+      } else {
+        loadDetailInBackground(scope)
+      }
     } catch {
       /* error set */
     } finally {
       loading.value = false
     }
-    loadDetailInBackground(scope)
     return
   }
   if (scope !== POWER_PRICE_SCOPE && scope !== COUPANG_1P_ROCKET_SCOPE) {

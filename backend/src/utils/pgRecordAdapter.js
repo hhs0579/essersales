@@ -18,6 +18,20 @@ export function adaptPgRecordFromRow(row) {
   const businessDate = toDateString(row.business_date)
   const date = orderDate || businessDate || toDateString(data.date)
 
+  const uploadKind = toStr(row.upload_kind || data.uploadKind)
+  const uploadFormat = toStr(row.upload_format || data.uploadFormat)
+  const isClosedMall =
+    uploadKind === 'bestheim_closed_mall' ||
+    uploadKind === 'esser_closed_mall' ||
+    uploadFormat === 'BESTHEIM_CLOSED_MALL' ||
+    uploadFormat === 'ESSER_CLOSED_MALL'
+
+  const storeName = toStr(row.store_name || data.storeName || data.closedMallSeller || '')
+  // 특판: brand = a브랜드(상품), 그 외: brand 컬럼에 스토어명 관례
+  const brand = isClosedMall
+    ? toStr(data.brand || data.productBrand || '')
+    : toStr(storeName || data.brand || data.storeName || '')
+
   return {
     ...data,
     id: row.id,
@@ -31,8 +45,8 @@ export function adaptPgRecordFromRow(row) {
     platform: row.platform || data.platform || data.channel || '',
     channel: row.channel || data.channel || row.platform || '',
     salesMethod: row.sales_method || data.salesMethod || '',
-    brand: row.store_name || data.brand || data.storeName || '',
-    storeName: row.store_name || data.storeName || data.brand || '',
+    brand,
+    storeName: storeName || (isClosedMall ? '' : brand),
     productCode: row.product_code || data.productCode || '',
     productName: row.product_name || data.productName || '',
     option: row.option_name || data.option || data.optionName || '',
@@ -45,8 +59,9 @@ export function adaptPgRecordFromRow(row) {
       row.net_profit != null ? toStr(row.net_profit) : toStr(data.netProfit ?? data.margin),
     adSpend: row.ad_spend != null ? toStr(row.ad_spend) : toStr(data.adSpend),
     transactionType: row.transaction_type || data.transactionType || '',
-    uploadKind: row.upload_kind || data.uploadKind || '',
-    uploadFormat: row.upload_format || data.uploadFormat || '',
+    uploadKind,
+    uploadFormat,
     sourceFileName: data.sourceFileName || '',
+    dataSourceLabel: data.dataSourceLabel || '',
   }
 }

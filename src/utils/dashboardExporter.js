@@ -60,7 +60,8 @@ import {
   POWER_PRICE_DATA_SOURCE_LABEL,
   POWER_PRICE_HIDDEN_KPI_KEYS,
 } from '../config/powerPrice.js'
-import { resolveRecordSourceLabel } from './recordSourceLabel.js'
+import { resolveCombinedBrandRollupLabel } from './recordSourceLabel.js'
+import { OTHER_SELLERS_BRAND_LABEL } from '../config/closedMall.js'
 import {
   buildProfitLossReportSheets,
   buildIntegratedProfitLossSummaryRows,
@@ -95,15 +96,21 @@ const COMBINED_BRAND_SUMMARY_REPORTS = [
     reportTitle: '파워프라이스 일별 매출 리포트',
     powerPrice: true,
   },
+  {
+    sourceLabel: OTHER_SELLERS_BRAND_LABEL,
+    sheetName: '기타 판매처 요약리포트',
+    reportTitle: '기타 판매처 일별 매출 리포트',
+    otherSellers: true,
+  },
 ]
 
 function filterRecordsBySourceLabel(records, sourceLabel) {
-  return (records || []).filter((r) => resolveRecordSourceLabel(r) === sourceLabel)
+  return (records || []).filter((r) => resolveCombinedBrandRollupLabel(r) === sourceLabel)
 }
 
 function hasCombinedSourceLabels(records) {
   return COMBINED_BRAND_SUMMARY_REPORTS.some((b) =>
-    (records || []).some((r) => r.dataSourceLabel === b.sourceLabel),
+    (records || []).some((r) => resolveCombinedBrandRollupLabel(r) === b.sourceLabel),
   )
 }
 
@@ -388,6 +395,7 @@ const FULL_DETAIL_COLUMNS = [
   { key: 'platform', label: '플랫폼' },
   { key: 'salesMethod', label: '판매방식' },
   { key: 'storeName', label: '스토어명' },
+  { key: 'brand', label: '브랜드' },
   { key: 'productId', label: '노출상품ID' },
   { key: 'optionId', label: '옵션ID' },
   { key: 'productCode', label: '자체상품코드' },

@@ -7,7 +7,13 @@ import {
 } from './platformResolve.js'
 import { mapSalesRecordBackfill, inferFileType } from './recordBackfill.js'
 
-const ALLOWED_DAILY_UPLOAD_KINDS = new Set(['platform_daily', 'sales_daily_b', '__test__'])
+const ALLOWED_DAILY_UPLOAD_KINDS = new Set([
+  'platform_daily',
+  'sales_daily_b',
+  'bestheim_closed_mall',
+  'esser_closed_mall',
+  '__test__',
+])
 const ALLOWED_PERIOD_UPLOAD_KINDS = new Set(['platform_period', 'sales_period_b', '__test__'])
 const ALLOWED_MONTHLY_UPLOAD_KINDS = new Set(['platform_monthly', 'sales_monthly_b', '__test__'])
 

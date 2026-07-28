@@ -217,6 +217,24 @@ export const DATA_CHANNELS = [
 
   },
 
+  {
+    id: 'channel_e',
+    tabLabel: '기타 판매처',
+    reportTitle: '특판 · 폐쇄몰',
+    description:
+      '에쎄르·베스트하임 특판/폐쇄몰 엑셀을 업로드합니다. 통합 대시보드에 판매처별 행으로 반영됩니다.',
+    esserDashboard: true,
+    closedMallChannel: true,
+    modes: [
+      {
+        id: 'daily',
+        label: '특판/폐쇄몰',
+        scope: 'other_sellers',
+        uploadKind: 'bestheim_closed_mall',
+      },
+    ],
+  },
+
 ]
 
 
@@ -263,11 +281,13 @@ export function getChannel(channelId) {
 export function getDashboardChannels() {
   const power = DATA_CHANNELS.find((c) => c.id === 'channel_c')
   const coupang1p = DATA_CHANNELS.find((c) => c.id === 'channel_d')
+  const otherSellers = DATA_CHANNELS.find((c) => c.id === 'channel_e')
   return [
     DATA_CHANNELS.find((c) => c.id === 'channel_a'),
     DATA_CHANNELS.find((c) => c.id === 'channel_b'),
     power,
     coupang1p,
+    otherSellers,
     COMBINED_CHANNEL,
     COMBINED_COMMENTS_CHANNEL,
   ].filter(Boolean)
@@ -350,6 +370,9 @@ export function getModeByUploadKind(uploadKind) {
   if (uploadKind === 'platform_period') {
     return { channel: getChannel('channel_a'), mode: getChannel('channel_a').modes[0] }
   }
+  if (uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall') {
+    return { channel: getChannel('channel_e'), mode: getChannel('channel_e').modes[0] }
+  }
   if (uploadKind === 'sales_period_b') {
     return { channel: getChannel('channel_b'), mode: getChannel('channel_b').modes[0] }
   }
@@ -365,9 +388,8 @@ export function getModeByUploadKind(uploadKind) {
 /** @param {string} channelId */
 
 export function uploadKindsForChannel(channelId) {
-
+  if (channelId === 'channel_e') return ['esser_closed_mall', 'bestheim_closed_mall']
   return getChannel(channelId).modes.map((m) => m.uploadKind)
-
 }
 
 
@@ -383,11 +405,18 @@ export function uploadKindsForScope(scope) {
     return uploadKindsForScope(dailyScopeForMonthly(scope))
   }
 
+  if (scope === 'platform') return ['platform_daily']
+
+  if (scope === 'other_sellers') return ['esser_closed_mall', 'bestheim_closed_mall']
+
   const found = getModeByScope(scope)
 
-  if (found?.mode?.uploadKind) return [found.mode.uploadKind]
-
-  if (scope === 'platform') return ['platform_daily']
+  if (found?.mode?.uploadKind) {
+    if (found.channel?.id === 'channel_e') {
+      return ['esser_closed_mall', 'bestheim_closed_mall']
+    }
+    return [found.mode.uploadKind]
+  }
 
   if (scope === 'sales_report') return ['sales_report']
 
@@ -429,6 +458,9 @@ export function usesEsserDashboard(scope) {
 /** @param {string} uploadKind */
 
 export function channelLabelForUploadKind(uploadKind) {
+  if (uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall') {
+    return '기타 판매처'
+  }
 
   for (const ch of DATA_CHANNELS) {
 
@@ -443,9 +475,18 @@ export function channelLabelForUploadKind(uploadKind) {
 
 
 export function isChannelUploadKind(kind) {
-
+  if (kind === 'bestheim_closed_mall' || kind === 'esser_closed_mall') return true
   return CHANNEL_UPLOAD_KINDS.has(kind)
+}
 
+/** @param {string} channelId */
+export function isClosedMallChannel(channelId) {
+  return getChannel(channelId)?.closedMallChannel === true
+}
+
+/** @param {string} scope */
+export function isOtherSellersScope(scope) {
+  return scope === 'other_sellers'
 }
 
 

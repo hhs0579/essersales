@@ -1,7 +1,7 @@
 import { applySalesMethodsToDetails } from './salesMethodDetect.js'
 
 /** 집계·필터에 쓰는 플랫폼 값 */
-export const MARKETPLACE_PLATFORMS = ['쿠팡', '스마트스토어', '네이버', '자사몰']
+export const MARKETPLACE_PLATFORMS = ['쿠팡', '스마트스토어', '네이버', '자사몰', '특판 폐쇄몰']
 
 /** UI·구데이터 호환: 네이버 선택 → 스마트스토어 */
 export function normalizePlatformLabel(platform) {

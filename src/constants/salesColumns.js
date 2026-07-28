@@ -87,7 +87,39 @@ export function isEsserDetailRow(row) {
   return hasAd || hasEsserSales
 }
 
+/** 특판 폐쇄몰 상세 표 — 판매처·브랜드·옵션 분리 */
+export const DETAIL_COLUMNS_CLOSED_MALL = [
+  { key: 'date', label: '날짜' },
+  { key: 'platform', label: '플랫폼' },
+  { key: 'storeName', label: '판매처' },
+  { key: 'brand', label: '브랜드' },
+  { key: 'productName', label: '상품명' },
+  { key: 'option', label: '옵션' },
+  { key: 'sales', label: '매출' },
+  { key: 'salesQty', label: '판매수량' },
+  { key: 'unitCost', label: '원가(단가)' },
+  { key: 'totalCost', label: '원가(합계)' },
+  { key: 'shippingFee', label: '배송비' },
+  { key: 'commission', label: '수수료' },
+  { key: 'netProfit', label: '순이익금' },
+  { key: 'sourceFileName', label: '원본파일' },
+]
+
+function isClosedMallDetailRow(row) {
+  const kind = String(row?.uploadKind || row?.upload_kind || '').trim()
+  if (kind === 'bestheim_closed_mall' || kind === 'esser_closed_mall') return true
+  const format = String(row?.uploadFormat || row?.upload_format || '').trim()
+  return format === 'BESTHEIM_CLOSED_MALL' || format === 'ESSER_CLOSED_MALL'
+}
+
 export function resolveDetailColumns(records = []) {
+  if (records.some(isClosedMallDetailRow)) {
+    const base = sanitizeDetailColumns(DETAIL_COLUMNS_CLOSED_MALL)
+    if (records.some((r) => r.dataSourceLabel)) {
+      return [{ key: 'dataSourceLabel', label: '출처' }, ...base]
+    }
+    return base
+  }
   const cols = records.some(isEsserDetailRow) ? DETAIL_COLUMNS_ESSER : DETAIL_COLUMNS
   const base = sanitizeDetailColumns(cols)
   if (records.some((r) => r.dataSourceLabel)) {

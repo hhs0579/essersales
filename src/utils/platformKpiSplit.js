@@ -1,5 +1,4 @@
 import { resolveRecordPlatform } from './platformDetect.js'
-import { resolveRecordSourceLabel } from './recordSourceLabel.js'
 
 import {
 
@@ -20,7 +19,17 @@ import {
   COMBINED_SEGMENT_DEFS,
   COMBINED_SEGMENT_LABELS,
   recordsForCombinedSegment,
+  closedMallKpiLabelsFromRecords,
+  recordsForCombinedSegmentLabel,
 } from './combinedKpiSegments.js'
+import {
+  formatClosedMallKpiLabel,
+  isClosedMallRecord,
+  resolveClosedMallSeller,
+  resolveClosedMallBrand,
+  OTHER_SELLERS_BRAND_LABEL,
+} from '../config/closedMall.js'
+import { resolveCombinedBrandRollupLabel } from './recordSourceLabel.js'
 import {
   MANUAL_AD_SOURCE_DEFS,
   MANUAL_AD_KPI_LABELS,
@@ -59,7 +68,11 @@ export const POWER_PRICE_KPI_SPLIT_LABELS = ['스마트스토어']
 
 export const COUPANG_1P_ROCKET_KPI_SPLIT_LABELS = ['쿠팡']
 
-export const COMBINED_BRAND_KPI_LABELS = ['베스트하임', '사본느리']
+export const COMBINED_BRAND_KPI_LABELS = [
+  '베스트하임',
+  '사본느리',
+  OTHER_SELLERS_BRAND_LABEL,
+]
 
 /** 통합 일별 — 세그먼트·외부광고·합계 */
 
@@ -207,21 +220,21 @@ function collectManualAdEntries(channelGroups) {
 
 
 
-/** 합계 — 상품(쿠팡+스마트스토어+자사몰) + 수동 광고(Meta·GFA·AD·구글 트래픽) */
-
-export function buildMergedTotalRow(coupang, smart, ownMall, extraAdRows = []) {
-
-  const cP = coupang.profit
-
-  const sP = smart.profit
-
-  const oP = ownMall?.profit || {}
-
-  const cA = coupang.ad
-
-  const sA = smart.ad
-
-  const oA = ownMall?.ad || {}
+/**
+ * 합계 — 상품(쿠팡+스마트스토어+자사몰+특판 판매처들) + 수동 광고
+ * @param {object} coupang
+ * @param {object} smart
+ * @param {object|null} ownMall
+ * @param {object[]} [extraAdRows]
+ * @param {object|object[]|null} [closedMallOrRows] 단일 행 또는 판매처별 행 배열
+ */
+export function buildMergedTotalRow(coupang, smart, ownMall, extraAdRows = [], closedMallOrRows = null) {
+  const closedRows = Array.isArray(closedMallOrRows)
+    ? closedMallOrRows
+    : closedMallOrRows
+      ? [closedMallOrRows]
+      : []
+  const productRows = [coupang, smart, ownMall, ...closedRows].filter(Boolean)
 
   let extraAdSpend = 0
   let extraAdSales = 0
@@ -232,61 +245,72 @@ export function buildMergedTotalRow(coupang, smart, ownMall, extraAdRows = []) {
     extraNetProfit += row?.profit?.netProfit || 0
   }
 
-  const sales = (cP.sales || 0) + (sP.sales || 0) + (oP.sales || 0)
+  let sales = 0
+  let salesQty = 0
+  let totalCost = 0
+  let netProfit = extraNetProfit
+  let adSpend = extraAdSpend
+  let adSales = extraAdSales
+  let rowCount = 0
 
-  const salesQty = (cP.salesQty || 0) + (sP.salesQty || 0) + (oP.salesQty || 0)
-
-  const totalCost = (cP.totalCost || 0) + (sP.totalCost || 0) + (oP.totalCost || 0)
-
-  const netProfit =
-    (cP.netProfit || 0) + (sP.netProfit || 0) + (oP.netProfit || 0) + extraNetProfit
-
-
-
-  const profit = deriveEsserProfitKpis({
-
-    sales,
-
-    salesQty,
-
-    totalCost,
-
-    netProfit,
-
-  })
-
-
-
-  const ad = finalizeEsserBucket({
-
-    sales,
-
-    salesQty,
-
-    totalCost,
-
-    netProfit,
-
-    adSpend: (cA.adSpend || 0) + (sA.adSpend || 0) + (oA.adSpend || 0) + extraAdSpend,
-
-    adSales: (cA.adSales || 0) + (sA.adSales || 0) + (oA.adSales || 0) + extraAdSales,
-
-  })
-
-
-
-  return {
-
-    label: '합계',
-
-    profit,
-
-    ad,
-
-    rowCount: (coupang.rowCount || 0) + (smart.rowCount || 0) + (ownMall?.rowCount || 0),
-
+  for (const row of productRows) {
+    sales += row?.profit?.sales || 0
+    salesQty += row?.profit?.salesQty || 0
+    totalCost += row?.profit?.totalCost || 0
+    netProfit += row?.profit?.netProfit || 0
+    adSpend += row?.ad?.adSpend || 0
+    adSales += row?.ad?.adSales || 0
+    rowCount += row?.rowCount || 0
   }
 
+  const profit = deriveEsserProfitKpis({
+    sales,
+    salesQty,
+    totalCost,
+    netProfit,
+  })
+
+  const ad = finalizeEsserBucket({
+    sales,
+    salesQty,
+    totalCost,
+    netProfit,
+    adSpend,
+    adSales,
+  })
+
+  return {
+    label: '합계',
+    profit,
+    ad,
+    rowCount,
+  }
+}
+
+/** 특판 폐쇄몰 → 판매처별 `브랜드(판매처)` KPI 행 */
+export function buildClosedMallPlatformRows(sourceRecords) {
+  const closed = (sourceRecords || []).filter((r) => isClosedMallRecord(r))
+  if (!closed.length) return []
+
+  const byLabel = new Map()
+  for (const row of closed) {
+    const brand = resolveClosedMallBrand(row) || '베스트하임'
+    const seller = resolveClosedMallSeller(row) || '특판'
+    const label = formatClosedMallKpiLabel(brand, seller)
+    if (!byLabel.has(label)) byLabel.set(label, [])
+    byLabel.get(label).push(row)
+  }
+
+  const labels = [...byLabel.keys()].sort((a, b) => a.localeCompare(b, 'ko'))
+  return labels.map((label) => buildPlatformRow(label, byLabel.get(label)))
+}
+
+/** 기타 판매처 탭 — 판매처 행 + 합계 */
+export function buildOtherSellersKpiSplitRows(sourceRecords) {
+  const closedMallRows = buildClosedMallPlatformRows(sourceRecords)
+  if (!closedMallRows.length) return []
+  const total = buildMergedTotalRow(null, null, null, [], closedMallRows)
+  return [...closedMallRows, total]
 }
 
 
@@ -333,8 +357,6 @@ export function buildPlatformKpiSplitRows(sourceRecords, manualAdByChannel, manu
 
   const ownMallSubset = source.filter((r) => resolveRecordPlatform(r) === '자사몰')
 
-
-
   const coupang = buildPlatformRow('쿠팡', coupangSubset)
 
   const smart = buildPlatformRow('스마트스토어', smartSubset, { estimateCostFromMargin: true })
@@ -343,7 +365,7 @@ export function buildPlatformKpiSplitRows(sourceRecords, manualAdByChannel, manu
 
   const rows = [coupang, smart, ownMall, ...manualAdRows]
 
-  const total = buildMergedTotalRow(coupang, smart, ownMall, manualAdRows)
+  const total = buildMergedTotalRow(coupang, smart, ownMall, manualAdRows, null)
 
   rows.push(total)
 
@@ -454,7 +476,7 @@ function manualEntriesForBrandLabel(manualAdByChannel, brandLabel) {
 }
 
 function recordsForBrandLabel(records, brandLabel) {
-  return (records || []).filter((r) => resolveRecordSourceLabel(r) === brandLabel)
+  return (records || []).filter((r) => resolveCombinedBrandRollupLabel(r) === brandLabel)
 }
 
 /** 통합 — 브랜드(베스트하임·사본느리) KPI 집계 */
@@ -545,10 +567,19 @@ export function buildCombinedKpiSplitRows(
     }
 
     const subset = recordsForCombinedSegment(source, def.key)
-    if (!subset.length) continue
+    if (subset.length) {
+      const estimateCostFromMargin = def.key === 'bh_ss' || def.key === 'sbn_ss'
+      segmentRows.push(buildPlatformRow(def.label, subset, { estimateCostFromMargin }))
+    }
 
-    const estimateCostFromMargin = def.key === 'bh_ss' || def.key === 'sbn_ss'
-    segmentRows.push(buildPlatformRow(def.label, subset, { estimateCostFromMargin }))
+    // 베스트하임(스스) 다음에 특판 판매처별 행
+    if (def.key === 'bh_ss') {
+      for (const label of closedMallKpiLabelsFromRecords(source)) {
+        const closedSubset = recordsForCombinedSegmentLabel(source, label)
+        if (!closedSubset.length) continue
+        segmentRows.push(buildPlatformRow(label, closedSubset))
+      }
+    }
   }
 
   segmentRows.push(...buildSpecialSaleKpiRows(manualFilterCtx?.specialSale))
@@ -862,11 +893,27 @@ export function buildKpiSplitRowsForChannel(
 
   }
 
+  if (channelLabel === '기타 판매처' || channelLabel === OTHER_SELLERS_BRAND_LABEL) {
+    return buildOtherSellersKpiSplitRows(sourceRecords)
+  }
+
   return buildPlatformKpiSplitRows(sourceRecords, manualAdByChannel, manualFilterCtx)
 
 }
 
 
+
+/**
+ * 통합 광고·판매량 표 — 광고비 0원인 세그먼트 행 숨김 (합계는 유지)
+ * @param {Array<{ label?: string, ad?: { adSpend?: number } }>} rows
+ */
+export function filterKpiRowsWithAdSpend(rows) {
+  return (rows || []).filter((row) => {
+    if (!row) return false
+    if (row.label === '합계') return true
+    return (Number(row.ad?.adSpend) || 0) > 0
+  })
+}
 
 /** @param {string} rowLabel @param {'profit'|'ad'} section @param {string} key */
 

@@ -93,7 +93,8 @@ export function mergeCoupang1pIntoServerPlatformRows(serverRows, c1pRecords, fil
     rowCount: 0,
   }
   const ownMall = serverRows.find((r) => r.label === '자사몰')
-  const total = buildMergedTotalRow(coupang, smart, ownMall, manualAdRows)
+  // 특판 폐쇄몰은 기타 판매처 탭 전용 — 베스트하임 서버 행에 남지 않도록 제외
+  const total = buildMergedTotalRow(coupang, smart, ownMall, manualAdRows, null)
 
   const marketplace = [coupang, smart, ownMall].filter(Boolean)
   return [...marketplace, ...manualAdRows, total]

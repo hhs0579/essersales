@@ -28,8 +28,10 @@ import {
   buildPowerPriceKpiSplitRows,
   buildCoupang1pRocketKpiSplitRows,
   buildCombinedKpiSplitRows,
+  buildOtherSellersKpiSplitRows,
   buildKpiSplitRowsForChannel,
   kpiSplitSectionTitle,
+  filterKpiRowsWithAdSpend,
   PLATFORM_KPI_SPLIT_LABELS,
   POWER_PRICE_KPI_SPLIT_LABELS,
   COUPANG_1P_ROCKET_KPI_SPLIT_LABELS,
@@ -75,6 +77,8 @@ const props = defineProps({
   powerPriceKpi: { type: Boolean, default: false },
   /** 쿠팡 1P 로켓 — 쿠팡 단일 행 (발주 직접입력) */
   coupang1pKpi: { type: Boolean, default: false },
+  /** 기타 판매처 — 특판 폐쇄몰 판매처 행 */
+  otherSellersKpi: { type: Boolean, default: false },
   /** 통합 일별 — 파워프라이스 별도 행 포함 (스마트스토어 KPI와 분리) */
   combinedKpi: { type: Boolean, default: false },
   /** Phase 2-1 — server KPI bucket (pg + VITE_KPI_SOURCE=server) */
@@ -155,6 +159,8 @@ const platformKpiRows = computed(() => {
       props.manualFilterCtx,
     )
     rows = patchCombinedRowsWithServerAd(rows, props.serverKpiBucket)
+  } else if (props.otherSellersKpi) {
+    rows = buildOtherSellersKpiSplitRows(kpiSourceRecords.value)
   } else {
     rows = buildPlatformKpiSplitRows(
       kpiSourceRecords.value,
@@ -165,12 +171,17 @@ const platformKpiRows = computed(() => {
   return rows
 })
 
+/** 통합 — 광고·판매량 표에서 광고비 0원 행 제외 */
+const platformKpiAdRows = computed(() =>
+  props.combinedKpi ? filterKpiRowsWithAdSpend(platformKpiRows.value) : platformKpiRows.value,
+)
+
 const kpiProfitSectionTitle = computed(() =>
   kpiSplitSectionTitle(platformKpiRows.value, 'profit', { compact: props.combinedKpi }),
 )
 
 const kpiAdSectionTitle = computed(() =>
-  kpiSplitSectionTitle(platformKpiRows.value, 'ad', { compact: props.combinedKpi }),
+  kpiSplitSectionTitle(platformKpiAdRows.value, 'ad', { compact: props.combinedKpi }),
 )
 
 const kpiSummary = computed(() => {
@@ -574,7 +585,7 @@ function formatAdKpiValue(card, value, rowLabel = '') {
         </thead>
         <tbody>
           <tr
-            v-for="row in platformKpiRows"
+            v-for="row in platformKpiAdRows"
             :key="`ad-${row.label}`"
             :class="{
               'row-total': row.label === '합계',

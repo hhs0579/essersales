@@ -37,7 +37,7 @@ export function isCombinedScope(scope) {
 
 /** 통합(일별·월별) — 모두 일별 데이터 기반 (월별은 월 단위 집계) */
 export function combinedSourceScopes(scope) {
-  if (isCombinedScope(scope)) return ['platform', 'company_b', 'power_price']
+  if (isCombinedScope(scope)) return ['platform', 'company_b', 'power_price', 'other_sellers']
   return []
 }
 
@@ -48,7 +48,7 @@ export function combinedIncludesPowerPrice(scope) {
 
 /** 외부 광고 scope (브랜드 + 파워프라이스) — 통합 일별·월별 공통 */
 export function combinedManualAdScopes(scope) {
-  if (isCombinedScope(scope)) return ['platform', 'company_b', 'power_price']
+  if (isCombinedScope(scope)) return ['platform', 'company_b', 'power_price', 'other_sellers']
   return ['platform', 'company_b']
 }
 

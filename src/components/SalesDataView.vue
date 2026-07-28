@@ -17,6 +17,7 @@ import {
   usesEsserDashboard,
   isPowerPriceScope as isPowerPriceScopeFn,
   isCoupang1pRocketScope as isCoupang1pRocketScopeFn,
+  isOtherSellersScope as isOtherSellersScopeFn,
   isMonthlyScope,
   isCombinedScope,
   combinedIncludesPowerPrice,
@@ -62,6 +63,7 @@ const isPlatformDaily = computed(() => props.scope === 'platform')
 const isCompanyBDaily = computed(() => props.scope === 'company_b')
 const isPowerPriceScope = computed(() => isPowerPriceScopeFn(props.scope))
 const isCoupang1pScope = computed(() => isCoupang1pRocketScopeFn(props.scope))
+const isOtherSellersScope = computed(() => isOtherSellersScopeFn(props.scope))
 const isManualInputScope = computed(() => isPowerPriceScope.value || isCoupang1pScope.value)
 const isMonthlyEsserScope = computed(() => isMonthlyScope(props.scope))
 const isDailyEsserScope = computed(() => usesEsserDashboard(props.scope) && !isMonthlyEsserScope.value)
@@ -712,6 +714,7 @@ const monthlyYearOptions = computed(() => {
       :show-platform-breakdown="isEsserScope"
       :power-price-kpi="isPowerPriceScope"
       :coupang1p-kpi="isCoupang1pScope"
+      :other-sellers-kpi="isOtherSellersScope"
       :combined-kpi="isCombined"
       :hide-day-over-day="pageMeta.hideDayOverDay"
       :records="dashboardKpiRecords"
