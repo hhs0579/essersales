@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import { readPlatformPeriodFile } from '../utils/platformOrderParser.js'
+import { parsePlatformPeriodInWorker } from '../utils/parseExcelInWorker.js'
 import { savePlatformPeriodUpload } from '../services/salesApi.js'
 
 const props = defineProps({
@@ -51,7 +51,7 @@ async function onFilesSelected(fileList) {
         format,
         salesMethod,
         dateRangeHint,
-      } = await readPlatformPeriodFile(file, platform.value)
+      } = await parsePlatformPeriodInWorker(file, platform.value)
 
       if (!details.length) {
         throw new Error(

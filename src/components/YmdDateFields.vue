@@ -99,7 +99,11 @@ watch(
       syncFromSource(v)
       return
     }
-    syncFromSource(props.suggestDate || effectiveMaxDate.value)
+    // 값이 비면 드롭다운도 비움. suggestDate를 표시만 하면 저장된 날짜처럼 보이거나
+    // 필터 시작일(dateFrom)로 오인·저장되는 사고가 난다.
+    year.value = ''
+    month.value = ''
+    day.value = ''
   },
   { immediate: true },
 )

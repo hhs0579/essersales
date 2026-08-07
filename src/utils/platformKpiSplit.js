@@ -550,18 +550,17 @@ export function buildCombinedKpiSplitRows(
   manualFilterCtx,
 ) {
   const source = allRecords || []
-  const bhSbnGroups = (manualAdByChannel || []).filter((g) => g.label !== '파워프라이스')
-  const ppManual = (manualAdByChannel || []).find((g) => g.label === '파워프라이스')?.entries || []
-  const bhSbnManual = collectManualAdEntries(bhSbnGroups)
-  const manualAdRows = buildManualAdKpiRows(bhSbnManual, manualFilterCtx)
+  // 파워프라이스 포함 — 외부 광고는 Meta·GFA·AD·구글 행에서만 합산 (세그먼트 행과 이중 계산 방지)
+  const allManual = collectManualAdEntries(manualAdByChannel)
+  const manualAdRows = buildManualAdKpiRows(allManual, manualFilterCtx)
 
   const segmentRows = []
 
   for (const def of COMBINED_SEGMENT_DEFS) {
     if (def.key === 'power_price') {
       const ppRows = source.filter((r) => isPowerPriceRecord(r))
-      if (ppRows.length || ppManual.length) {
-        segmentRows.push(buildPowerPriceBrandRow(ppRows, ppManual, manualFilterCtx))
+      if (ppRows.length) {
+        segmentRows.push(buildPowerPriceBrandRow(ppRows, [], manualFilterCtx))
       }
       continue
     }

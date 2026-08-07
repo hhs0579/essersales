@@ -251,11 +251,10 @@ function salesMethodLabelForRow(row) {
   return salesMethodGroupLabel(row) || ''
 }
 
-/** 통합 리포트 — 베스트하임·사본느리 수동 광고 (파워프라이스 제외) */
-function collectBhSbnEntriesBySource(channelGroups, sourceValue) {
+/** 통합 리포트 — 전 채널 수동 광고 (파워프라이스 포함) */
+function collectEntriesBySource(channelGroups, sourceValue) {
   const items = []
   for (const g of channelGroups || []) {
-    if (g.label === POWER_PRICE_LABEL) continue
     const bySource = groupManualAdEntriesBySource(g.entries)
     items.push(...(bySource[sourceValue] || []))
   }
@@ -322,7 +321,7 @@ function collectExternalAdSupplementRows(channelGroups, manualFilterCtx) {
     const row = externalAdSupplementRow(
       def.kpiLabel,
       summarizeManualAdKpiOnly(
-        collectBhSbnEntriesBySource(channelGroups, def.value),
+        collectEntriesBySource(channelGroups, def.value),
         manualFilterCtx,
       ),
     )
@@ -357,7 +356,8 @@ function storeHasExternalAd(channelGroups, storeLabel, manualFilterCtx) {
 
 function summarizeSalesMethodGroup(label, group, channelGroups, manualFilterCtx) {
   if (label === POWER_PRICE_LABEL) {
-    const k = summarizePowerPriceKpis(group, powerPriceManualEntries(channelGroups), manualFilterCtx)
+    // 외부 광고는 Meta·GFA·AD·구글 보조행에서 합산 — 여기서 빼야 합계가 이중 계산되지 않음
+    const k = summarizePowerPriceKpis(group, [], manualFilterCtx)
     return { k, totalCost: k.totalCost || summarizeKpis(group).totalCost }
   }
   const k = summarizeEsserKpis(group)
@@ -474,7 +474,7 @@ export function buildIntegratedPnlAndDayOverDaySection(kpi, costKpi, dayOverDayR
           '구분',
           salesComparisonCurrentColumnLabel(mode),
           salesComparisonPrevColumnLabel(mode, first),
-          salesComparisonChangeColumnLabel(mode),
+          `${salesComparisonChangeColumnLabel(mode)} 증감액`,
           `${salesComparisonChangeColumnLabel(mode)}(%)`,
           '추이',
         ]
@@ -522,8 +522,9 @@ export function buildIntegratedPnlAndDayOverDaySection(kpi, costKpi, dayOverDayR
   rows.push(joinRow(pnlHeader, dodHeader))
 
   const maxLen = Math.max(pnlLines.length, dodBody.length, 1)
+  const emptyDod = Array.from({ length: rightCols }, () => '')
   for (let i = 0; i < maxLen; i += 1) {
-    rows.push(joinRow(pnlLines[i] || ['', '', ''], dodBody[i] || ['', '', '', '', '']))
+    rows.push(joinRow(pnlLines[i] || ['', '', ''], dodBody[i] || emptyDod))
   }
   rows.push([])
   return rows

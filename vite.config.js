@@ -11,6 +11,10 @@ export default defineConfig({
       },
     },
   },
+  // Phase 4 — excel parse worker (code-split 시 iife 불가 → es)
+  worker: {
+    format: 'es',
+  },
   build: {
     rollupOptions: {
       output: {

@@ -69,8 +69,9 @@ export async function clearProfitLossTemplate() {
   }
 }
 
-export async function hydrateProfitLossTemplate() {
-  if (hydrated) return templateRef.value
+/** @param {{ forceRefresh?: boolean }} [opts] */
+export async function hydrateProfitLossTemplate(opts = {}) {
+  if (!opts.forceRefresh && hydrated) return templateRef.value
   hydrated = true
   try {
     const res = await fetchAppSetting(PROFIT_LOSS_TEMPLATE_SCOPE, PROFIT_LOSS_TEMPLATE_KIND)

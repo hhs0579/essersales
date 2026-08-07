@@ -53,6 +53,7 @@ import {
 import { normalizePlatformLabel } from '../utils/platformDetect.js'
 import { computeDayOverDaySales, computeCombinedBrandDayOverDaySales, resolveSalesComparisonMode, salesComparisonSectionTitle, salesComparisonCurrentColumnLabel, salesComparisonPrevColumnLabel, salesComparisonChangeColumnLabel } from '../utils/dayOverDaySales.js'
 import { filterKpiCards } from '../config/combinedChannel.js'
+import { isServerKpiOnly } from '../services/kpiSource.js'
 
 const props = defineProps({
   records: { type: Array, default: () => [] },
@@ -87,6 +88,8 @@ const props = defineProps({
   serverPlatformKpiRows: { type: Array, default: () => [] },
   /** Phase 2-2 — server day-over-day rows */
   serverDayOverDayRows: { type: Array, default: () => [] },
+  /** 통합 — 브랜드 세그먼트(베스트하임·사본느리 등) detail 로딩 중 */
+  segmentsLoading: { type: Boolean, default: false },
 })
 
 
@@ -128,20 +131,35 @@ function preferServerAdMetrics(clientAd, serverBucket) {
   return ad
 }
 
-function patchCombinedRowsWithServerAd(rows, serverBucket) {
+/** 합계 행 — 서버 KPI로 profit·ad 모두 고정 (클라 재집계 덮어쓰기 방지) */
+function patchCombinedTotalFromServer(rows, serverBucket) {
   if (!serverBucket || !rows?.length) return rows
   return rows.map((row) => {
     if (row.label !== '합계') return row
+    if (isServerKpiOnly()) {
+      return {
+        ...row,
+        profit: { ...(row.profit || {}), ...serverBucket },
+        ad: { ...(row.ad || {}), ...serverBucket },
+      }
+    }
     return { ...row, ad: preferServerAdMetrics(row.ad, serverBucket) }
   })
 }
 
 const platformKpiRows = computed(() => {
-  if (props.serverPlatformKpiRows?.length && !props.combinedKpi) return props.serverPlatformKpiRows
-  if (!showPlatformSplit.value) return []
+  // 직접입력 스코프는 클라 집계 우선 (서버 by-platform과 행 구조가 다름)
+  if (props.powerPriceKpi || props.coupang1pKpi) {
+    /* fall through to builders below */
+  } else if (props.serverPlatformKpiRows?.length && !props.combinedKpi) {
+    // 플랫폼·기타: 서버 행 고정
+    return props.serverPlatformKpiRows
+  }
+  if (!showPlatformSplit.value && !props.powerPriceKpi && !props.coupang1pKpi) return []
   const channelGroups = props.manualAdByChannel.length
     ? props.manualAdByChannel
     : [{ label: '베스트하임', entries: props.manualAdEntries }]
+  const hasClientRecords = (props.records?.length || 0) > 0 || kpiSourceRecords.value.length > 0
   let rows = []
   if (props.powerPriceKpi) {
     rows = buildPowerPriceKpiSplitRows(
@@ -152,15 +170,27 @@ const platformKpiRows = computed(() => {
   } else if (props.coupang1pKpi) {
     rows = buildCoupang1pRocketKpiSplitRows(kpiSourceRecords.value)
   } else if (props.combinedKpi) {
-    rows = buildCombinedKpiSplitRows(
-      props.records,
-      kpiSourceRecords.value,
-      channelGroups,
-      props.manualFilterCtx,
-    )
-    rows = patchCombinedRowsWithServerAd(rows, props.serverKpiBucket)
+    // 통합 표 = 브랜드 세그먼트(클라). detail/날짜 재집계 중엔 서버 플랫폼 행만 (메인스레드 렉 방지)
+    if (props.segmentsLoading || !hasClientRecords) {
+      rows = props.serverPlatformKpiRows || []
+      if (props.serverKpiBucket && rows.length) {
+        rows = patchCombinedTotalFromServer(rows, props.serverKpiBucket)
+      }
+    } else {
+      // 합계는 세그먼트 합산 유지.
+      // 서버 KPI로 합계만 덮으면(광고 이중계상·범위 불일치) 행 합 ≠ 합계로 보임.
+      rows = buildCombinedKpiSplitRows(
+        props.records,
+        kpiSourceRecords.value,
+        channelGroups,
+        props.manualFilterCtx,
+      )
+    }
   } else if (props.otherSellersKpi) {
     rows = buildOtherSellersKpiSplitRows(kpiSourceRecords.value)
+    if (props.serverKpiBucket) {
+      rows = patchCombinedTotalFromServer(rows, props.serverKpiBucket)
+    }
   } else {
     rows = buildPlatformKpiSplitRows(
       kpiSourceRecords.value,
@@ -185,10 +215,13 @@ const kpiAdSectionTitle = computed(() =>
 )
 
 const kpiSummary = computed(() => {
-  if (props.combinedKpi && platformKpiRows.value.length) {
+  // 통합 브랜드 세그먼트가 준비되면 표 합계 = 상단 KPI (서버 합계와 섞지 않음)
+  if (props.combinedKpi && !props.segmentsLoading && platformKpiRows.value.length) {
     const total = platformKpiRows.value.find((r) => r.label === '합계')
     if (total) return { ...total.ad, ...total.profit }
   }
+  // 그 외 스코프: 화면 상단 KPI는 서버 단일 소스
+  if (props.serverKpiBucket && isServerKpiOnly()) return props.serverKpiBucket
   if (props.serverKpiBucket && !props.combinedKpi) return props.serverKpiBucket
   if (showPlatformSplit.value) {
     if (props.powerPriceKpi && platformKpiRows.value.length) {
@@ -213,7 +246,13 @@ const kpiSummary = computed(() => {
   )
 })
 
-const reconcile = computed(() => reconcileEsserTotals(props.records))
+const reconcile = computed(() => {
+  // 서버 KPI 단일 소스일 때는 전량 reconcile 생략 (날짜 변경 렉)
+  if (props.serverKpiBucket && isServerKpiOnly()) {
+    return { rowCount: 0, kpi: {}, dailyBucketCount: 0, dailySalesSum: 0, salesMismatch: false, salesDiff: 0 }
+  }
+  return reconcileEsserTotals(props.records)
+})
 
 
 
@@ -236,7 +275,10 @@ const dayOverDayLookupRecords = computed(() =>
 
 const dayOverDayRows = computed(() => {
   if (props.hideDayOverDay) return []
-  if (props.serverDayOverDayRows?.length && !props.combinedKpi) return props.serverDayOverDayRows
+  // Phase 2: 서버 전일대비가 있으면 통합 포함 우선 (detail 대기/덮어쓰기 방지)
+  if (props.serverDayOverDayRows?.length && (isServerKpiOnly() || !props.combinedKpi)) {
+    return props.serverDayOverDayRows
+  }
   const lookup = dayOverDayLookupRecords.value
   if (!lookup.length && !props.records.length) return []
   const compute = props.combinedKpi ? computeCombinedBrandDayOverDaySales : computeDayOverDaySales
@@ -450,6 +492,19 @@ function formatAdKpiValue(card, value, rowLabel = '') {
 
 
     <p class="filter-summary">{{ filterSummary }} · 상품 {{ records.length }}행</p>
+
+    <div
+      v-if="segmentsLoading"
+      class="segments-loading"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="segments-loading-spinner" aria-hidden="true" />
+      <div class="segments-loading-text">
+        <strong>브랜드·채널 상세 불러오는 중</strong>
+        <span>베스트하임·사본느리·자사몰·파워프라이스 행이 곧 표시됩니다. 상단 합계 KPI는 이미 반영된 값입니다.</span>
+      </div>
+    </div>
 
     <p v-if="manualAdNote" class="manual-ad-note">{{ manualAdNote }}</p>
 
@@ -954,5 +1009,52 @@ function formatAdKpiValue(card, value, rowLabel = '') {
 
 }
 
+.segments-loading {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin: 0.5rem 0 0.85rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a5f;
+}
+
+.segments-loading-spinner {
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.15rem;
+  border: 3px solid rgba(37, 99, 235, 0.2);
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: segments-spin 0.8s linear infinite;
+}
+
+.segments-loading-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.segments-loading-text strong {
+  font-size: 0.9rem;
+}
+
+.segments-loading-text span {
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: #334155;
+}
+
+@keyframes segments-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 </style>
+
 

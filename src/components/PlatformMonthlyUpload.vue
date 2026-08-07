@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import { readPlatformMonthlyFile } from '../utils/platformOrderParser.js'
+import { parsePlatformMonthlyInWorker } from '../utils/parseExcelInWorker.js'
 import {
   deleteUploadAndRecords,
   fetchUploads,
@@ -63,7 +63,7 @@ async function onFilesSelected(fileList) {
         format,
         salesMethod,
         dateRangeHint,
-      } = await readPlatformMonthlyFile(file, platform.value)
+      } = await parsePlatformMonthlyInWorker(file, platform.value)
 
       progressMessage.value = `${filePrefix}데이터 정제 및 분석 중...`
       await yieldTick()

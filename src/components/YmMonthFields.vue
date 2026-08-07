@@ -72,7 +72,9 @@ watch(
       syncFromSource(v)
       return
     }
-    syncFromSource(props.suggestDate || effectiveMaxDate.value)
+    // 빈 값에 suggestDate를 보여 주면 실제 저장값과 UI가 어긋남 (필터 시작월 오인)
+    year.value = ''
+    month.value = ''
   },
   { immediate: true },
 )

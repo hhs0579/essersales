@@ -50,6 +50,37 @@ function parseOptionalAmount(val) {
 }
 
 /**
+ * a수수료 — 금액 또는 비율
+ * - `25%` / `25.0%` → 결제가 × 25%
+ * - 엑셀 퍼센트 셀(숫자 0.25) → 결제가 × 25%  (raw:true 시 % 문자 없이 0.25로 옴)
+ * - `12500` 등 1 초과 숫자 → 수수료 금액
+ */
+function parseOptionalCommission(val, payment) {
+  if (val == null || String(val).trim() === '') return 0
+  const pay = Number(payment) || 0
+
+  // 엑셀 퍼센트 서식: 셀 값이 0.25 숫자로 들어옴
+  if (typeof val === 'number' && Number.isFinite(val)) {
+    if (val > 0 && val <= 1) return Math.round(pay * val)
+    return Math.round(Math.abs(val))
+  }
+
+  const raw = String(val).trim()
+  if (raw.includes('%')) {
+    const rate = parseAmount(raw.replace(/%/g, ''))
+    if (!Number.isFinite(rate) || rate < 0) return 0
+    // `25%` → 25, `0.25%` → 0.25 (초소 비율도 허용)
+    return Math.round((pay * rate) / 100)
+  }
+
+  const n = parseAmount(raw)
+  if (!Number.isFinite(n) || n === 0) return 0
+  // 문자열 "0.25"도 엑셀 퍼센트와 동일하게 비율로 처리
+  if (n > 0 && n <= 1) return Math.round(pay * n)
+  return Math.round(Math.abs(n))
+}
+
+/**
  * @param {string[]} headerRow
  * @returns {Record<string, number>|null}
  */
@@ -162,7 +193,7 @@ export function parseClosedMallDataRow(p, _existingFingerprints = new Set()) {
   if (!costParsed.ok) errors.push('a원가 없음/오류')
 
   const shippingFee = parseOptionalAmount(shippingRaw)
-  const commission = parseOptionalAmount(feeRaw)
+  const commission = parseOptionalCommission(feeRaw, payParsed.value || 0)
 
   if (errors.length) {
     return {

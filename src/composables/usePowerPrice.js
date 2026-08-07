@@ -183,42 +183,27 @@ export async function persistPowerPriceStore() {
 
 
 
-export async function hydratePowerPriceStore() {
+/** @param {{ forceRefresh?: boolean }} [opts] */
+export async function hydratePowerPriceStore(opts = {}) {
+  if (!opts.forceRefresh && hydrated) return storeRef.value
 
   try {
-
     const res = await fetchAppSetting(POWER_PRICE_SCOPE, SETTING_KIND)
-
     if (res?.data) {
-
       storeRef.value = normalizeStore(res.data)
-
       hydrated = true
-
       return storeRef.value
-
     }
-
   } catch {
-
     /* 서버 미연결 */
-
   }
-
-
 
   const legacy = loadLegacyStore()
-
   if (legacy) {
-
     storeRef.value = legacy
-
   }
-
   hydrated = true
-
   return storeRef.value
-
 }
 
 

@@ -208,10 +208,12 @@ function dashboardModesFor(ch) {
         <span class="channel-badge">{{ activeChannel.tabLabel }}</span>
       </header>
 
-      <SalesDataView
-        :key="`${activeChannel.id}-${activeDashboardMode}`"
-        :scope="scopeFor(activeChannel.id)"
-      />
+      <KeepAlive :max="8">
+        <SalesDataView
+          :key="`${activeChannel.id}-${activeDashboardMode}`"
+          :scope="scopeFor(activeChannel.id)"
+        />
+      </KeepAlive>
       </template>
     </div>
 

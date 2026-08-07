@@ -79,18 +79,51 @@ export async function pgFetchUploads() {
   return items
 }
 
-export async function pgFetchSalesRecords(recordType = 'detail') {
+/**
+ * @param {string} [recordType]
+ * @param {{
+ *   includeData?: 'none' | 'lean' | 'full' | boolean,
+ *   from?: string,
+ *   to?: string,
+ *   scope?: string,
+ * }} [opts]
+ */
+export async function pgFetchSalesRecords(recordType = 'detail', opts = {}) {
+  const includeRaw = opts.includeData
+  let includeData = 'lean'
+  if (includeRaw === true || includeRaw === 'full') includeData = 'full'
+  else if (includeRaw === false || includeRaw === 'none') includeData = 'none'
+  else if (includeRaw === 'lean') includeData = 'lean'
+
   const items = await fetchAllPages(
-    (page, limit) =>
-      `/records?page=${page}&limit=${limit}&record_type=${encodeURIComponent(recordType)}&include_data=true&sort=created_at&order=asc`,
+    (page, limit) => {
+      const qs = new URLSearchParams({
+        page: String(page),
+        limit: String(limit),
+        record_type: recordType,
+        include_data: includeData === 'none' ? 'false' : includeData,
+        sort: 'created_at',
+        order: 'asc',
+      })
+      if (opts.from) qs.set('from', opts.from)
+      if (opts.to) qs.set('to', opts.to)
+      if (opts.scope) qs.set('scope', opts.scope)
+      return `/records?${qs}`
+    },
     (body) => adaptPgRecordList(body.items),
     `records:${recordType}`,
   )
   return items
 }
 
-export async function pgFetchAppSetting(scope, kind) {
+/**
+ * @param {string} scope
+ * @param {string} kind
+ * @param {{ omitSources?: boolean }} [opts]
+ */
+export async function pgFetchAppSetting(scope, kind, opts = {}) {
   const qs = new URLSearchParams({ scope, kind })
+  if (opts.omitSources) qs.set('omit_sources', '1')
   const body = await pgRequest(`/settings?${qs}`)
   return adaptPgSettingResponse(body.items)
 }
@@ -113,46 +146,46 @@ export async function pgPutAppSetting(scope, kind, data) {
   return adaptPgSettingPutResponse(body)
 }
 
-/**
- * @param {Record<string, string>} [filters]
- */
-export async function pgFetchKpiSummary(filters = {}) {
+function kpiQuerySuffix(filters = {}) {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(filters)) {
     if (v != null && String(v).trim() !== '') qs.set(k, String(v))
   }
-  const suffix = qs.toString() ? `?${qs}` : ''
-  const body = await pgRequest(`/kpi/summary${suffix}`)
+  return qs.toString() ? `?${qs}` : ''
+}
+
+/**
+ * @param {Record<string, string>} [filters]
+ * @param {{ signal?: AbortSignal }} [opts]
+ */
+export async function pgFetchKpiSummary(filters = {}, opts = {}) {
+  const body = await pgRequest(`/kpi/summary${kpiQuerySuffix(filters)}`, {
+    signal: opts.signal,
+  })
   return adaptPgKpiSummary(body)
 }
 
-export async function pgFetchKpiDaily(filters = {}) {
-  const qs = new URLSearchParams()
-  for (const [k, v] of Object.entries(filters)) {
-    if (v != null && String(v).trim() !== '') qs.set(k, String(v))
-  }
-  const suffix = qs.toString() ? `?${qs}` : ''
-  const body = await pgRequest(`/kpi/daily${suffix}`)
+/** @param {Record<string, string>} [filters] @param {{ signal?: AbortSignal }} [opts] */
+export async function pgFetchKpiDaily(filters = {}, opts = {}) {
+  const body = await pgRequest(`/kpi/daily${kpiQuerySuffix(filters)}`, {
+    signal: opts.signal,
+  })
   return adaptPgKpiDaily(body)
 }
 
-export async function pgFetchKpiByPlatform(filters = {}) {
-  const qs = new URLSearchParams()
-  for (const [k, v] of Object.entries(filters)) {
-    if (v != null && String(v).trim() !== '') qs.set(k, String(v))
-  }
-  const suffix = qs.toString() ? `?${qs}` : ''
-  const body = await pgRequest(`/kpi/by-platform${suffix}`)
+/** @param {Record<string, string>} [filters] @param {{ signal?: AbortSignal }} [opts] */
+export async function pgFetchKpiByPlatform(filters = {}, opts = {}) {
+  const body = await pgRequest(`/kpi/by-platform${kpiQuerySuffix(filters)}`, {
+    signal: opts.signal,
+  })
   return adaptPgKpiByPlatform(body)
 }
 
-export async function pgFetchKpiCompareYesterday(filters = {}) {
-  const qs = new URLSearchParams()
-  for (const [k, v] of Object.entries(filters)) {
-    if (v != null && String(v).trim() !== '') qs.set(k, String(v))
-  }
-  const suffix = qs.toString() ? `?${qs}` : ''
-  const body = await pgRequest(`/kpi/compare-yesterday${suffix}`)
+/** @param {Record<string, string>} [filters] @param {{ signal?: AbortSignal }} [opts] */
+export async function pgFetchKpiCompareYesterday(filters = {}, opts = {}) {
+  const body = await pgRequest(`/kpi/compare-yesterday${kpiQuerySuffix(filters)}`, {
+    signal: opts.signal,
+  })
   return adaptPgKpiCompareYesterday(body)
 }
 

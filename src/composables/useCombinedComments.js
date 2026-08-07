@@ -1,6 +1,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 
 import {
+  COMBINED_COMMENT_LABELS,
   createEmptyCombinedComments,
   createEmptyCommentSlots,
   COMBINED_COMMENTS_SETTING_KIND,
@@ -20,12 +21,13 @@ const store = reactive(createEmptyCombinedComments())
 const hydrated = ref(false)
 
 function applyStore(normalized) {
-  store.labels.splice(0, store.labels.length, ...normalized.labels)
+  // 라벨은 항상 최신 정의(폐쇄몰 추가 등) — 저장소의 구 labels 무시
+  store.labels.splice(0, store.labels.length, ...COMBINED_COMMENT_LABELS)
   for (const key of Object.keys(store.byDate)) {
     delete store.byDate[key]
   }
   for (const [ymd, slots] of Object.entries(normalized.byDate || {})) {
-    store.byDate[ymd] = [...slots]
+    store.byDate[ymd] = normalizeCommentSlots(slots)
   }
 }
 
@@ -74,7 +76,7 @@ function toPersistPayload() {
     }
   }
   return {
-    labels: [...store.labels],
+    labels: [...COMBINED_COMMENT_LABELS],
     byDate,
   }
 }
@@ -148,8 +150,14 @@ async function persistDayCommentsMerged(ymd, localSlots, opts = {}) {
   }
 }
 
-/** 서버·로컬에서 통합 코멘트 스토어 로드 */
-export async function hydrateCombinedCommentsForScope(_scope) {
+/**
+ * 서버·로컬에서 통합 코멘트 스토어 로드
+ * @param {string} [_scope]
+ * @param {{ forceRefresh?: boolean }} [opts]
+ */
+export async function hydrateCombinedCommentsForScope(_scope, opts = {}) {
+  if (!opts.forceRefresh && hydrated.value) return store
+
   try {
     const res = await fetchAppSetting(
       COMBINED_COMMENTS_SETTING_SCOPE,
@@ -225,7 +233,7 @@ export function getCombinedCommentsSnapshot(_scope, range = {}) {
   if (dateFrom && dateTo && dateFrom === dateTo) {
     const existing = days.find((d) => d.date === dateFrom)
     return {
-      labels: [...store.labels],
+      labels: [...COMBINED_COMMENT_LABELS],
       byDate: { [dateFrom]: existing?.comments || getCommentSlotsForDate(store.byDate, dateFrom) },
       days: [
         {
@@ -242,7 +250,7 @@ export function getCombinedCommentsSnapshot(_scope, range = {}) {
     byDate[key] = d.comments
   }
   return {
-    labels: [...store.labels],
+    labels: [...COMBINED_COMMENT_LABELS],
     byDate,
     days,
   }

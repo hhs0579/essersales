@@ -9,6 +9,7 @@ import {
   aggregatePlatformKpiFromRows,
   compareYesterdayFromRows,
   sumSheetAdMetricsFromDetailRows,
+  addDaysToYmd,
 } from '../utils/esserKpiAggregate.js'
 import { filterByScope } from '../utils/scopeFilter.js'
 import { adaptPgRecordFromRow } from '../utils/pgRecordAdapter.js'
@@ -186,7 +187,8 @@ export async function getKpiSummary(query) {
 
 export async function getKpiDaily(query) {
   const filters = parseKpiQuery(query)
-  const rows = await loadProductRows(filters, { skipDateInSql: true })
+  // Phase 3: kpi_date 기간을 SQL에 푸시다운 (인덱스 활용)
+  const rows = await loadProductRows(filters, { skipDateInSql: false })
   const items = aggregateDailyKpiFromRows(rows, {
     from: filters.from,
     to: filters.to,
@@ -207,7 +209,7 @@ export async function getKpiDaily(query) {
 
 export async function getKpiByPlatform(query) {
   const filters = parseKpiQuery(query)
-  const rows = await loadDetailRows(filters, { skipDateInSql: true })
+  const rows = await loadDetailRows(filters, { skipDateInSql: false })
   const { items, total, allItems } = aggregatePlatformKpiFromRows(rows, {
     from: filters.from,
     to: filters.to,
@@ -225,9 +227,31 @@ export async function getKpiByPlatform(query) {
   return merged
 }
 
+/** compare-yesterday용 ref 날짜 — 쿼리에 명시된 경우만 (없으면 전량 로드 후 resolve) */
+function resolveCompareRefFromFilters(filters) {
+  const date = String(filters.date || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date
+  const to = String(filters.to || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(to)) return to
+  const from = String(filters.from || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from) && !to) return from
+  return ''
+}
+
 export async function getKpiCompareYesterday(query) {
   const filters = parseKpiQuery(query)
-  const rows = await loadDetailRows(filters, { skipDateInSql: true })
+  const ref = resolveCompareRefFromFilters(filters)
+  let rows
+  if (ref) {
+    const prev = addDaysToYmd(ref, -1)
+    // ref·prev 2일 윈도우만 SQL 로드 (period overlap은 buildKpiWhere OR 유지)
+    rows = await loadDetailRows(
+      { ...filters, from: prev || ref, to: ref },
+      { skipDateInSql: false },
+    )
+  } else {
+    rows = await loadDetailRows(filters, { skipDateInSql: true })
+  }
   const result = compareYesterdayFromRows(rows, {
     date: filters.date,
     from: filters.from,

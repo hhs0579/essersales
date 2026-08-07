@@ -101,7 +101,7 @@ function jumpToDay(ymd) {
 <template>
   <div class="combined-comments-page">
     <p class="standard-ref page-hint">
-      베스트하임 · 사본느리 · 파워프라이스 · 마케팅 코멘트를 <strong>날짜마다</strong> 저장합니다.
+      베스트하임 · 사본느리 · 파워프라이스 · 폐쇄몰 · 마케팅 코멘트를 <strong>날짜마다</strong> 저장합니다.
       주간 등 기간을 지정하면 그 구간에 작성한 일별 코멘트가 모두 보입니다. (기준일: 어제까지)
     </p>
 

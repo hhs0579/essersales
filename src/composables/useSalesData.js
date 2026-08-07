@@ -106,7 +106,7 @@ import {
   COUPANG_1P_ROCKET_HIDDEN_KPI_KEYS,
   isCoupang1pRocketRecord,
 } from '../config/coupang1pRocket.js'
-import { isServerKpi } from '../services/kpiSource.js'
+import { isServerKpi, isLazyDetailLoad } from '../services/kpiSource.js'
 import {
   shouldMergeOwnMallManualKpi,
   mergeOwnMallManualIntoServerPlatformRows,
@@ -136,16 +136,53 @@ import {
   adaptServerPlatformKpiRows,
   adaptServerDayOverDayRows,
 } from '../services/adapters/platformKpiAdapter.js'
+import { createTtlCache } from '../utils/ttlCache.js'
 
 /** @typedef {import('../config/dataChannels.js').DataChannel['modes'][0]['scope'] | 'sales_report'} DataScope */
+
+const KPI_CACHE_TTL_MS = 45000
+const serverKpiResultCache = createTtlCache(KPI_CACHE_TTL_MS)
+/** @type {Map<string, number>} */
+const kpiRequestSequenceByScope = new Map()
+/** @type {Map<string, AbortController>} */
+const kpiAbortByScope = new Map()
+/** @type {Map<string, string>} */
+const kpiLastCacheKeyByScope = new Map()
+
+function buildServerKpiCacheKey(scope, query) {
+  const parts = [
+    'kpi',
+    scope || '',
+    query.from || '',
+    query.to || '',
+    query.date || '',
+    query.platform || '',
+    query.sales_method || '',
+    query.store_name || '',
+    query.include_manual_ads || '',
+  ]
+  return parts.join(':')
+}
+
+function invalidateServerKpiCaches(scope) {
+  if (scope) {
+    serverKpiResultCache.invalidate((key) => key.startsWith(`kpi:${scope}:`))
+    return
+  }
+  serverKpiResultCache.invalidate()
+}
 
 const initialized = ref(false)
 const detailCacheLoaded = ref(false)
 const detailCacheLoading = ref(false)
 const detailCacheError = ref('')
 const detailCacheLoadedAt = ref(null)
+/** detail 캐시 버전 — 업로드 성공 시 증가 */
+let detailCacheVersion = 0
 /** @type {Promise<void> | null} */
 let detailCachePromise = null
+/** 현재 로드된 detail 캐시 버전 */
+let detailCacheLoadedVersion = -1
 const dailyCacheLoaded = ref(false)
 const channelCacheLoaded = ref(false)
 const productCacheLoaded = ref(false)
@@ -388,7 +425,9 @@ function detailsForSummaryAggregation(scope, slice) {
 }
 
 async function loadDetailCache() {
-  const fetched = await fetchSalesRecords('detail')
+  // 통합 세그먼트 KPI는 data JSONB 필드(원가·특판·시트총합 등)가 필요.
+  // lean은 필드를 빼 이전화면과 숫자가 달라지므로 full 유지.
+  const fetched = await fetchSalesRecords('detail', { includeData: 'full' })
   const uploadById = new Map(uploads.value.map((u) => [u.id, u]))
   detailRecords.value = fetched.map((row) => {
     const upload = uploadById.get(row.uploadId)
@@ -457,7 +496,29 @@ async function loadRecordsForScope(scope, { silent = false } = {}) {
     error.value = ''
   }
   try {
-    const fetched = await fetchSalesRecords(slice.activeTab.value)
+    const tab = slice.activeTab.value
+
+    // detail 탭·집계 탭 모두: 이미 있는 detail 캐시로 처리 (전량 /records 재호출 금지)
+    if (tab === 'detail' || (scope !== 'sales_report' && detailCacheLoaded.value)) {
+      if (!detailCacheLoaded.value || detailCacheLoadedVersion !== detailCacheVersion) {
+        await ensureDetailCache()
+      }
+      const scopedDetails = applyUploadScope(
+        filterByScope(detailRecords.value, scope),
+        slice.selectedUploadIds,
+      )
+      if (tab === 'detail') {
+        // 화면 상세 표는 scopedDetailRecords(computed)가 detailRecords를 씀
+        slice.records.value = scopedDetails
+      } else if (scopedDetails.length) {
+        slice.records.value = buildSummaryTabFromDetails(tab, scopedDetails)
+      } else {
+        slice.records.value = []
+      }
+      return
+    }
+
+    const fetched = await fetchSalesRecords(tab)
     const scopedFetched = filterByScope(fetched, scope)
     slice.records.value = scopedFetched
 
@@ -466,12 +527,10 @@ async function loadRecordsForScope(scope, { silent = false } = {}) {
       slice.selectedUploadIds,
     )
 
-    if (slice.activeTab.value === 'detail') {
-      // 상세는 detailRecords + 필터로 표시
-    } else if (scope !== 'sales_report' && scopedDetails.length) {
-      slice.records.value = buildSummaryTabFromDetails(slice.activeTab.value, scopedDetails)
+    if (scope !== 'sales_report' && scopedDetails.length) {
+      slice.records.value = buildSummaryTabFromDetails(tab, scopedDetails)
     } else if (!scopedFetched.length && scopedDetails.length) {
-      slice.records.value = buildSummaryTabFromDetails(slice.activeTab.value, scopedDetails)
+      slice.records.value = buildSummaryTabFromDetails(tab, scopedDetails)
     }
   } catch (e) {
     if (!silent) error.value = `데이터 불러오기 실패: ${e.message}`
@@ -495,21 +554,50 @@ async function loadUploads() {
   }
 }
 
-async function ensureDetailCache() {
-  if (detailCacheLoaded.value) return
-  if (detailCachePromise) return detailCachePromise
+/**
+ * @param {{ forceRefresh?: boolean }} [opts]
+ */
+async function ensureDetailCache(opts = {}) {
+  const forceRefresh = Boolean(opts.forceRefresh)
+  if (forceRefresh) {
+    invalidateDetailCache()
+  }
 
+  if (
+    detailCacheLoaded.value &&
+    detailCacheLoadedVersion === detailCacheVersion
+  ) {
+    return
+  }
+
+  if (detailCachePromise) {
+    try {
+      await detailCachePromise
+    } catch {
+      /* 이전 실패 무시 후 필요 시 재시도 */
+    }
+    if (detailCacheLoaded.value && detailCacheLoadedVersion === detailCacheVersion) {
+      return
+    }
+  }
+
+  const loadVersion = detailCacheVersion
   detailCacheLoading.value = true
   detailCacheError.value = ''
   detailCachePromise = (async () => {
     try {
       await loadDetailCache()
+      // 로드 중 invalidate되면 완료해도 캐시로 채택하지 않음
+      if (loadVersion !== detailCacheVersion) return
       detailCacheLoaded.value = true
+      detailCacheLoadedVersion = loadVersion
       detailCacheLoadedAt.value = new Date().toISOString()
     } catch (e) {
-      detailCacheLoaded.value = false
-      detailCacheError.value = e?.message || '상세 데이터 로드 실패'
-      error.value = `상세 데이터 로드 실패: ${detailCacheError.value}`
+      if (loadVersion === detailCacheVersion) {
+        detailCacheLoaded.value = false
+        detailCacheError.value = e?.message || '상세 데이터 로드 실패'
+        error.value = `상세 데이터 로드 실패: ${detailCacheError.value}`
+      }
       throw e
     } finally {
       detailCacheLoading.value = false
@@ -519,10 +607,17 @@ async function ensureDetailCache() {
   return detailCachePromise
 }
 
-async function retryDetailCache() {
+/** 업로드 성공 후에만 호출 — 기존 데이터는 다음 필요 시 1회 재로드 */
+function invalidateDetailCache() {
+  detailCacheVersion += 1
   detailCacheLoaded.value = false
+  detailCacheLoadedAt.value = null
   detailCacheError.value = ''
-  return ensureDetailCache()
+  // 진행 중 Promise는 그대로 두되, 완료 후 loadedVersion 불일치로 다음 ensure가 재로드
+}
+
+async function retryDetailCache() {
+  return ensureDetailCache({ forceRefresh: true })
 }
 
 async function ensureTabAggregateCache(tab) {
@@ -548,22 +643,20 @@ async function ensureTabAggregateCache(tab) {
 }
 
 async function refreshAll() {
-  await hydrateAppSettings()
-  detailCacheLoaded.value = false
-  detailCacheLoadedAt.value = null
-  detailCacheError.value = ''
+  await hydrateAppSettings({ forceRefresh: true })
+  invalidateDetailCache()
+  invalidateServerKpiCaches()
   dailyCacheLoaded.value = false
   channelCacheLoaded.value = false
   productCacheLoaded.value = false
   productOptionCacheLoaded.value = false
   await Promise.all([
-    loadDetailCache(),
+    ensureDetailCache({ forceRefresh: true }),
     loadDailyCache(),
     loadChannelCache(),
     loadProductCache(),
     loadProductOptionCache(),
   ])
-  detailCacheLoaded.value = true
   dailyCacheLoaded.value = true
   channelCacheLoaded.value = true
   productCacheLoaded.value = true
@@ -586,105 +679,158 @@ async function ensureCoreLoaded() {
   initialized.value = true
 }
 
-/** PG + server KPI — summary/daily API만 로드 (detail 전량 로드 생략) */
-async function loadServerKpiForScope(scope) {
+/**
+ * 서버 KPI 응답을 slice에 반영 (+ 수기 merge)
+ * @param {string} scope
+ * @param {{ summary: unknown, daily: unknown, byPlatform: unknown, compareYesterday: unknown }} bundle
+ */
+function applyServerKpiBundleToSlice(scope, bundle) {
   const slice = getSlice(scope)
-  const query = buildKpiQueryFromFilters(slice.filters.value, scope)
-  try {
-    const [summary, daily, byPlatform, compareYesterday] = await Promise.all([
-      fetchKpiSummary(query),
-      fetchKpiDaily(query),
-      fetchKpiByPlatform(query),
-      fetchKpiCompareYesterday(query),
-    ])
-    slice.serverKpiBucket.value = summary ? adaptServerKpiToEsserBucket(summary) : null
-    slice.serverDailyChartBuckets.value = daily?.items
-      ? adaptServerDailyToChartBuckets(daily.items)
-      : []
-    slice.serverPlatformKpiRows.value = byPlatform
-      ? adaptServerPlatformKpiRows(byPlatform)
-      : []
-    slice.serverDayOverDayRows.value = compareYesterday
-      ? adaptServerDayOverDayRows(compareYesterday)
-      : []
+  const { summary, daily, byPlatform, compareYesterday } = bundle
+  slice.serverKpiBucket.value = summary ? adaptServerKpiToEsserBucket(summary) : null
+  slice.serverDailyChartBuckets.value = daily?.items
+    ? adaptServerDailyToChartBuckets(daily.items)
+    : []
+  slice.serverPlatformKpiRows.value = byPlatform ? adaptServerPlatformKpiRows(byPlatform) : []
+  slice.serverDayOverDayRows.value = compareYesterday
+    ? adaptServerDayOverDayRows(compareYesterday)
+    : []
 
-    if (shouldMergeOwnMallManualKpi(scope)) {
-      const filterCtx = {
-        ...slice.filters.value,
-        platform: '',
-      }
-      const ownMallRecords = ownMallManualDetailRecords.value
-      const ownMallRow = buildOwnMallPlatformRow(ownMallRecords, filterCtx)
-
-      if (ownMallRow && !isCombinedScope(scope)) {
-        slice.serverPlatformKpiRows.value = mergeOwnMallManualIntoServerPlatformRows(
-          slice.serverPlatformKpiRows.value,
-          ownMallRecords,
-          filterCtx,
-        )
-      }
-      if (ownMallRow) {
-        slice.serverKpiBucket.value = mergeOwnMallIntoServerKpiBucket(
-          slice.serverKpiBucket.value,
-          ownMallRow,
-        )
-        slice.serverDailyChartBuckets.value = mergeOwnMallManualIntoDailyBuckets(
-          slice.serverDailyChartBuckets.value,
-          ownMallRecords,
-          filterCtx,
-        )
-      }
+  if (shouldMergeOwnMallManualKpi(scope)) {
+    const filterCtx = {
+      ...slice.filters.value,
+      platform: '',
     }
+    const ownMallRecords = ownMallManualDetailRecords.value
+    const ownMallRow = buildOwnMallPlatformRow(ownMallRecords, filterCtx)
 
-    if (shouldMergePowerPriceKpi(scope)) {
-      const filterCtx = {
-        ...slice.filters.value,
-        platform: '',
-      }
-      const ppRow = buildPowerPriceKpiRow(
-        powerPriceDetailRecords.value,
-        combinedManualAdChannelGroups(scope),
+    if (ownMallRow && !isCombinedScope(scope)) {
+      slice.serverPlatformKpiRows.value = mergeOwnMallManualIntoServerPlatformRows(
+        slice.serverPlatformKpiRows.value,
+        ownMallRecords,
         filterCtx,
       )
-      if (ppRow) {
-        slice.serverKpiBucket.value = mergePowerPriceIntoServerKpiBucket(
-          slice.serverKpiBucket.value,
-          ppRow,
-        )
-      }
+    }
+    if (ownMallRow) {
+      slice.serverKpiBucket.value = mergeOwnMallIntoServerKpiBucket(
+        slice.serverKpiBucket.value,
+        ownMallRow,
+      )
+      slice.serverDailyChartBuckets.value = mergeOwnMallManualIntoDailyBuckets(
+        slice.serverDailyChartBuckets.value,
+        ownMallRecords,
+        filterCtx,
+      )
+    }
+  }
+
+  if (shouldMergePowerPriceKpi(scope)) {
+    const filterCtx = {
+      ...slice.filters.value,
+      platform: '',
+    }
+    const ppRow = buildPowerPriceKpiRow(
+      powerPriceDetailRecords.value,
+      combinedManualAdChannelGroups(scope),
+      filterCtx,
+    )
+    if (ppRow) {
+      slice.serverKpiBucket.value = mergePowerPriceIntoServerKpiBucket(
+        slice.serverKpiBucket.value,
+        ppRow,
+      )
+    }
+  }
+
+  if (shouldMergeCoupang1pKpi(scope)) {
+    const filterCtx = {
+      ...slice.filters.value,
+      platform: '',
+      salesMethod: '',
+    }
+    const c1pRecords = coupang1pRocketDetailRecords.value
+    const c1pRow = buildCoupang1pPlatformRow(c1pRecords, filterCtx)
+
+    if (c1pRow && !isCombinedScope(scope)) {
+      slice.serverPlatformKpiRows.value = mergeCoupang1pIntoServerPlatformRows(
+        slice.serverPlatformKpiRows.value,
+        c1pRecords,
+        filterCtx,
+      )
+    }
+    if (c1pRow) {
+      slice.serverKpiBucket.value = mergeCoupang1pIntoServerKpiBucket(
+        slice.serverKpiBucket.value,
+        c1pRow,
+      )
+      slice.serverDailyChartBuckets.value = mergeCoupang1pIntoDailyBuckets(
+        slice.serverDailyChartBuckets.value,
+        c1pRecords,
+        filterCtx,
+      )
+    }
+  }
+
+  slice.serverKpiLoaded.value = true
+}
+
+/**
+ * PG + server KPI — TTL 캐시 · single-flight · Abort · request sequence
+ * @param {string} scope
+ * @param {{ forceRefresh?: boolean }} [opts]
+ */
+async function loadServerKpiForScope(scope, opts = {}) {
+  const slice = getSlice(scope)
+  const query = buildKpiQueryFromFilters(slice.filters.value, scope)
+  const cacheKey = buildServerKpiCacheKey(scope, query)
+  const requestSequence = (kpiRequestSequenceByScope.get(scope) || 0) + 1
+  kpiRequestSequenceByScope.set(scope, requestSequence)
+
+  const prevKey = kpiLastCacheKeyByScope.get(scope)
+  // 조회 조건이 바뀔 때만 이전 요청 취소 (동일 key single-flight는 유지)
+  if (prevKey && prevKey !== cacheKey) {
+    const prevAbort = kpiAbortByScope.get(scope)
+    if (prevAbort) prevAbort.abort()
+  }
+  kpiLastCacheKeyByScope.set(scope, cacheKey)
+
+  let abortController = kpiAbortByScope.get(scope)
+  if (!abortController || abortController.signal.aborted || prevKey !== cacheKey) {
+    abortController = new AbortController()
+    kpiAbortByScope.set(scope, abortController)
+  }
+  const { signal } = abortController
+
+  try {
+    if (opts.forceRefresh) {
+      serverKpiResultCache.invalidate(cacheKey)
     }
 
-    if (shouldMergeCoupang1pKpi(scope)) {
-      const filterCtx = {
-        ...slice.filters.value,
-        platform: '',
-        salesMethod: '',
-      }
-      const c1pRecords = coupang1pRocketDetailRecords.value
-      const c1pRow = buildCoupang1pPlatformRow(c1pRecords, filterCtx)
+    const bundle = await serverKpiResultCache.getOrLoad(cacheKey, async () => {
+      const [summary, daily, byPlatform, compareYesterday] = await Promise.all([
+        fetchKpiSummary(query, { signal }),
+        fetchKpiDaily(query, { signal }),
+        fetchKpiByPlatform(query, { signal }),
+        fetchKpiCompareYesterday(query, { signal }),
+      ])
+      return { summary, daily, byPlatform, compareYesterday }
+    })
 
-      if (c1pRow && !isCombinedScope(scope)) {
-        slice.serverPlatformKpiRows.value = mergeCoupang1pIntoServerPlatformRows(
-          slice.serverPlatformKpiRows.value,
-          c1pRecords,
-          filterCtx,
-        )
-      }
-      if (c1pRow) {
-        slice.serverKpiBucket.value = mergeCoupang1pIntoServerKpiBucket(
-          slice.serverKpiBucket.value,
-          c1pRow,
-        )
-        slice.serverDailyChartBuckets.value = mergeCoupang1pIntoDailyBuckets(
-          slice.serverDailyChartBuckets.value,
-          c1pRecords,
-          filterCtx,
-        )
-      }
-    }
+    if (requestSequence !== kpiRequestSequenceByScope.get(scope)) return
+    if (signal.aborted) return
 
-    slice.serverKpiLoaded.value = true
+    applyServerKpiBundleToSlice(scope, bundle)
   } catch (e) {
+    if (e?.name === 'AbortError' || signal.aborted) return
+    if (requestSequence !== kpiRequestSequenceByScope.get(scope)) return
+
+    // 실패 시 캐시된 이전 값이 있으면 stale 유지
+    const stale = serverKpiResultCache.get(cacheKey)
+    if (stale) {
+      applyServerKpiBundleToSlice(scope, stale)
+      return
+    }
+
     slice.serverKpiBucket.value = null
     slice.serverDailyChartBuckets.value = []
     slice.serverPlatformKpiRows.value = []
@@ -696,12 +842,17 @@ async function loadServerKpiForScope(scope) {
 }
 
 /**
- * KPI를 먼저 띄운 뒤, 상세(엑셀용)는 idle에 백그라운드 로드.
- * 판매데이터 섹션을 펼치지 않아도 엑셀·집계에 쓰일 수 있게 함.
+ * detail 백그라운드 로드.
+ * - 통합: 브랜드 세그먼트(베스트하임·사본느리·자사몰·파워 등) 표에 필요 → lazy여도 prefetch
+ * - 기타/플랫폼: 서버 KPI만으로 충분 → lazy면 skip
  */
 function loadDetailInBackground(scope) {
   if (scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE) return
-  if (detailCacheLoaded.value || detailCacheLoading.value) return
+  if (scope === 'other_sellers') return
+  if (isLazyDetailLoad() && !isCombinedScope(scope)) return
+  const cacheFresh =
+    detailCacheLoaded.value && detailCacheLoadedVersion === detailCacheVersion
+  if (cacheFresh || detailCacheLoading.value) return
 
   const run = () => {
     ensureDetailCache()
@@ -718,7 +869,7 @@ function loadDetailInBackground(scope) {
   }
 }
 
-/** 대시보드 — KPI API 우선. 상세는 백그라운드(판매데이터 펼침과 무관) */
+/** 대시보드 — KPI API 우선. 통합만 세그먼트용 detail을 백그라운드 로드 */
 async function ensureDashboardReady(scope) {
   await ensureCoreLoaded()
   if (
@@ -730,13 +881,16 @@ async function ensureDashboardReady(scope) {
     error.value = ''
     try {
       await loadServerKpiForScope(scope)
-      // 통합·기타 판매처 세그먼트(특판 폐쇄몰 판매처 행)는 클라이언트 상세가 필요
-      if (isCombinedScope(scope) || scope === 'other_sellers') {
+      if (!isLazyDetailLoad() && isCombinedScope(scope)) {
         await ensureDetailCache()
         await loadRecordsForScope(scope, { silent: true })
-      } else {
+      } else if (isCombinedScope(scope)) {
+        // 상단 KPI는 서버로 먼저 표시 → detail은 BG로 세그먼트 표 채움
+        loadDetailInBackground(scope)
+      } else if (!isLazyDetailLoad()) {
         loadDetailInBackground(scope)
       }
+      // other_sellers·platform lazy: detail prefetch 없음
     } catch {
       /* error set */
     } finally {
@@ -763,12 +917,18 @@ async function ensureLoaded() {
 async function refreshAfterUpload(scopes = ['platform']) {
   await loadUploads()
   const scopeList = Array.isArray(scopes) ? scopes : [scopes]
+  for (const s of scopeList) invalidateServerKpiCaches(s)
+  invalidateDetailCache()
   if (isServerKpi()) {
-    await Promise.all(scopeList.map((s) => loadServerKpiForScope(s)))
-    if (detailCacheLoaded.value) {
-      detailCacheLoaded.value = false
-      detailCacheLoadedAt.value = null
-      await ensureDetailCache()
+    await Promise.all(scopeList.map((s) => loadServerKpiForScope(s, { forceRefresh: true })))
+    // KPI만 즉시 갱신. detail은 다음 펼침/엑셀 때 로드 (lazy 기본)
+    if (!isLazyDetailLoad()) {
+      if (
+        scopeList.some((s) => isCombinedScope(s) || s === 'other_sellers') ||
+        detailCacheLoading.value
+      ) {
+        await ensureDetailCache({ forceRefresh: true })
+      }
     }
   } else {
     await refreshAll()
@@ -1111,33 +1271,12 @@ function createScopedApi(scope) {
     const combined = isCombinedScope(scope)
     const canPgExport = isPgExportMode()
 
-    // 통합 엑셀은 상세 캐시 필요 — 접혀 있어도 다운로드 시 로드
-    if (combined || (!canPgExport && usesServerKpiMode.value)) {
-      try {
-        await ensureDetailForScope()
-      } catch {
-        /* fall through — rows check below */
-      }
-    }
-
-    const rows = filteredDetailForCharts.value
-
-    if (combined) {
-      if (!rows.length) {
-        error.value = '다운로드할 데이터가 없습니다. 필터·업로드 선택을 확인하세요.'
-        return
-      }
-    } else if (!canPgExport && !rows.length) {
-      error.value = '다운로드할 데이터가 없습니다. 필터·업로드 선택을 확인하세요.'
-      return
-    }
     error.value = ''
     saving.value = true
     try {
       const channel = getChannelByScope(scope)
       const adPeriod = isMonthlyScope(scope) ? 'monthly' : 'daily'
       const adChannel = findExternalAdChannelByScope(scope)
-      // 광고는 항상 일별 scope에서 조회 (월별도 일별 데이터 기반)
       const manualScopes = combined
         ? combinedManualAdScopes(scope)
         : [resolveExternalAdScope(adChannel, 'daily') || dailyScopeForMonthly(scope)].filter(Boolean)
@@ -1150,19 +1289,54 @@ function createScopedApi(scope) {
         await hydrateSpecialSaleForScope(scope)
       }
 
-      // 통합 — 브라우저에서 엑셀 생성 (웹 KPI·특판과 동일 코드)
-      if (!combined && canPgExport) {
+      // Phase 4: 통합 포함 — 서버 export 우선 (detail/ExcelJS 메인스레드 회피)
+      if (canPgExport) {
         const f = slice.filters.value
-        const { blob, fileName } = await pgDownloadIntegratedExport({
-          scope,
-          from: f.dateFrom,
-          to: f.dateTo,
-          platform: f.platform,
-          sales_method: f.salesMethod,
-          include_manual_ads: 'true',
-        })
-        triggerBlobDownload(blob, fileName)
-        success.value = '매출 리포트 엑셀 다운로드 완료 (PG API)'
+        const overrides = {}
+        if (combined) {
+          overrides.combined_comments = getCombinedCommentsSnapshot(scope, {
+            dateFrom: f.dateFrom || '',
+            dateTo: f.dateTo || '',
+          })
+          if (isMonthlyScope(scope)) {
+            const monthKey =
+              resolveReferenceMonthKey([], { ...f, period: adPeriod }) ||
+              (f.dateTo ? String(f.dateTo).slice(0, 7) : '')
+            overrides.special_sale = getSpecialSaleSnapshot(scope, monthKey)
+          }
+        }
+        try {
+          const { blob, fileName } = await pgDownloadIntegratedExport(
+            {
+              scope,
+              from: f.dateFrom,
+              to: f.dateTo,
+              platform: f.platform,
+              sales_method: f.salesMethod,
+              include_manual_ads: 'true',
+            },
+            overrides,
+          )
+          triggerBlobDownload(blob, fileName)
+          success.value = combined
+            ? `통합 손익계산 엑셀 완료 — 서버 export (양식 v${INTEGRATED_REPORT_LAYOUT_VER} · 빌드 ${UI_BUILD_ID})`
+            : '매출 리포트 엑셀 다운로드 완료 (PG API)'
+          return
+        } catch (pgErr) {
+          // 서버 실패 시에만 클라 ExcelJS fallback
+          console.warn('PG export 실패, 클라이언트 fallback:', pgErr?.message || pgErr)
+        }
+      }
+
+      // ExcelJS fallback — detail 캐시 필요
+      try {
+        await ensureDetailForScope()
+      } catch {
+        /* fall through */
+      }
+      const rows = filteredDetailForCharts.value
+      if (!rows.length) {
+        error.value = '다운로드할 데이터가 없습니다. 필터·업로드 선택을 확인하세요.'
         return
       }
 

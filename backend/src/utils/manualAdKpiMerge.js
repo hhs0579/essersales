@@ -85,16 +85,10 @@ export function resolveManualAdEntryYmd(entry, filterCtx = {}) {
   return ''
 }
 
-function entryHasManualAdAmount(entry) {
-  return parseAmount(entry?.adSpend) > 0 || parseAmount(entry?.adSales) > 0
-}
-
 export function manualAdEntryInView(entry, filterCtx = {}) {
   const ymd = resolveManualAdEntryYmd(entry, filterCtx)
-  if (!ymd) {
-    const hasFilter = !!(filterCtx.from || filterCtx.to)
-    return entryHasManualAdAmount(entry) && hasFilter
-  }
+  // 날짜 미입력·파싱 실패 행은 KPI 집계에서 제외
+  if (!ymd) return false
   if (filterCtx.from && ymd < filterCtx.from) return false
   if (filterCtx.to && ymd > filterCtx.to) return false
   return true

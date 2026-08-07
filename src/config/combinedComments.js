@@ -4,8 +4,12 @@ export const COMBINED_COMMENT_LABELS = [
   '베스트하임',
   '사본느리',
   '파워프라이스',
+  '폐쇄몰',
   '마케팅',
 ]
+
+/** 레거시 저장(4칸) — 마케팅이 index 3이던 시절 */
+const LEGACY_COMMENT_SLOT_COUNT = 4
 
 export const COMBINED_COMMENTS_SLOT_COUNT = COMBINED_COMMENT_LABELS.length
 
@@ -59,15 +63,30 @@ export function combinedCommentsHasContent(data) {
 }
 
 /**
+ * @param {unknown} v
+ * @returns {string}
+ */
+function slotToString(v) {
+  return typeof v === 'string' || typeof v === 'number' ? String(v) : ''
+}
+
+/**
  * @param {string[]} slots
  * @returns {string[]}
  */
 export function normalizeCommentSlots(slots) {
   const src = Array.isArray(slots) ? slots : []
-  return COMBINED_COMMENT_LABELS.map((_, i) => {
-    const v = src[i]
-    return typeof v === 'string' || typeof v === 'number' ? String(v) : ''
-  })
+  // 레거시 4칸 [BH, SBN, PP, 마케팅] → 폐쇄몰(빈칸) 끼워 넣고 마케팅을 끝으로
+  if (src.length === LEGACY_COMMENT_SLOT_COUNT && COMBINED_COMMENTS_SLOT_COUNT === 5) {
+    return [
+      slotToString(src[0]),
+      slotToString(src[1]),
+      slotToString(src[2]),
+      '',
+      slotToString(src[3]),
+    ]
+  }
+  return COMBINED_COMMENT_LABELS.map((_, i) => slotToString(src[i]))
 }
 
 /**

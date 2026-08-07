@@ -114,7 +114,10 @@ export async function persistCoupang1pRocketStore() {
   clearLegacyStore()
 }
 
-export async function hydrateCoupang1pRocketStore() {
+/** @param {{ forceRefresh?: boolean }} [opts] */
+export async function hydrateCoupang1pRocketStore(opts = {}) {
+  if (!opts.forceRefresh && hydrated) return storeRef.value
+
   try {
     const res = await fetchAppSetting(COUPANG_1P_ROCKET_SCOPE, SETTING_KIND)
     if (res?.data) {

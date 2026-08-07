@@ -30,13 +30,13 @@ function normalizeSalesSourceFiles(raw) {
     .map((item) => {
       if (!item || typeof item !== 'object') return null
       const s = /** @type {Record<string, unknown>} */ (item)
-      if (typeof s.dataBase64 !== 'string' || !s.dataBase64) return null
-      return {
-        id: typeof s.id === 'string' ? s.id : '',
-        fileName: typeof s.fileName === 'string' ? s.fileName : '',
-        dataBase64: s.dataBase64,
-        uploadedAt: typeof s.uploadedAt === 'string' ? s.uploadedAt : '',
-      }
+      const id = typeof s.id === 'string' ? s.id : ''
+      const fileName = typeof s.fileName === 'string' ? s.fileName : ''
+      const dataBase64 = typeof s.dataBase64 === 'string' ? s.dataBase64 : ''
+      const uploadedAt = typeof s.uploadedAt === 'string' ? s.uploadedAt : ''
+      // omit_sources 응답: 메타만 유지 (재파싱은 dataBase64 있을 때만)
+      if (!dataBase64 && !id && !fileName) return null
+      return { id, fileName, dataBase64, uploadedAt }
     })
     .filter(Boolean)
 }
@@ -119,19 +119,36 @@ export async function rebuildOwnMallSalesFromStoredSources({ persist = false } =
 
   rebuildPromise = (async () => {
     const store = storeRef.value
-    if (!store.salesSourceFiles?.length) {
+    let sources = (store.salesSourceFiles || []).filter((f) => f?.dataBase64)
+    if (!sources.length) {
+      // hydrate가 omit_sources였으면 full GET으로 원본 보강
+      try {
+        const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+        if (full?.data) {
+          const normalized = normalizeStore(full.data)
+          storeRef.value = {
+            ...storeRef.value,
+            salesSourceFiles: normalized.salesSourceFiles,
+          }
+          sources = normalized.salesSourceFiles.filter((f) => f?.dataBase64)
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!sources.length) {
       return { changed: false }
     }
 
-    const before = salesSnapshot(store.sales)
-    const { manual } = partitionOwnMallSales(store.sales)
+    const before = salesSnapshot(storeRef.value.sales)
+    const { manual } = partitionOwnMallSales(storeRef.value.sales)
     const { excelSales, skippedCanceled } = await rebuildExcelSalesFromSources(
-      store.products,
-      store.salesSourceFiles,
+      storeRef.value.products,
+      sources,
     )
-    store.sales = [...manual, ...excelSales]
+    storeRef.value.sales = [...manual, ...excelSales]
 
-    const changed = before !== salesSnapshot(store.sales)
+    const changed = before !== salesSnapshot(storeRef.value.sales)
     if (changed && persist) {
       await persistOwnMallManualStore()
     }
@@ -152,26 +169,50 @@ export async function persistOwnMallManualStore() {
   }
 }
 
-export async function hydrateOwnMallManualStore() {
-  try {
-    const res = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
-    if (res?.data) {
-      storeRef.value = normalizeStore(res.data)
-      hydrated = true
-      if (storeRef.value.salesSourceFiles.length) {
-        try {
-          await rebuildOwnMallSalesFromStoredSources({ persist: true })
-        } catch (e) {
-          console.warn('자사몰 원본 재파싱 실패:', e)
+/** @type {Promise<unknown> | null} */
+let hydratePromise = null
+
+/** @param {{ forceRefresh?: boolean }} [opts] */
+export async function hydrateOwnMallManualStore(opts = {}) {
+  if (!opts.forceRefresh && hydrated) return storeRef.value
+  if (!opts.forceRefresh && hydratePromise) return hydratePromise
+
+  hydratePromise = (async () => {
+    try {
+      // Phase 3: 기본은 base64 제외(payload 다이어트). products/sales 비면 full fallback
+      let res = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND, {
+        omitSources: true,
+      })
+      if (res?.data) {
+        let normalized = normalizeStore(res.data)
+        const empty =
+          !normalized.products.length && !normalized.sales.length
+        if (empty) {
+          res = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+          if (res?.data) normalized = normalizeStore(res.data)
         }
+        storeRef.value = normalized
+        hydrated = true
+        const hasBase64 = storeRef.value.salesSourceFiles.some((f) => f.dataBase64)
+        if (hasBase64) {
+          try {
+            await rebuildOwnMallSalesFromStoredSources({ persist: true })
+          } catch (e) {
+            console.warn('자사몰 원본 재파싱 실패:', e)
+          }
+        }
+        return storeRef.value
       }
-      return storeRef.value
+    } catch {
+      /* 서버 미연결 */
     }
-  } catch {
-    /* 서버 미연결 */
-  }
-  hydrated = true
-  return storeRef.value
+    hydrated = true
+    return storeRef.value
+  })().finally(() => {
+    hydratePromise = null
+  })
+
+  return hydratePromise
 }
 
 export function useOwnMallManual() {

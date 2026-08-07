@@ -178,21 +178,38 @@ function applyList(target, list) {
   target.splice(0, target.length, ...list)
 }
 
-/** @param {string} scope */
-export async function hydrateManualAdForScope(scope) {
+/** @type {Map<string, Promise<unknown>>} */
+const hydratePromiseByScope = new Map()
+
+/**
+ * @param {string} scope
+ * @param {{ forceRefresh?: boolean }} [opts]
+ */
+export async function hydrateManualAdForScope(scope, opts = {}) {
   const entries = ensureListRef(scope)
-  try {
-    const res = await fetchAppSetting(scope, SETTING_KIND)
-    if (res?.data != null && Array.isArray(res.data)) {
-      applyList(entries.value, normalizeList(res.data))
-      hydratedScopes.add(scope)
-      return entries.value
-    }
-  } catch {
-    /* 서버 미연결 — 로컬 폴백 */
+  if (!opts.forceRefresh && hydratedScopes.has(scope)) return entries.value
+  if (!opts.forceRefresh && hydratePromiseByScope.has(scope)) {
+    return hydratePromiseByScope.get(scope)
   }
-  hydratedScopes.add(scope)
-  return entries.value
+
+  const p = (async () => {
+    try {
+      const res = await fetchAppSetting(scope, SETTING_KIND)
+      if (res?.data != null && Array.isArray(res.data)) {
+        applyList(entries.value, normalizeList(res.data))
+        hydratedScopes.add(scope)
+        return entries.value
+      }
+    } catch {
+      /* 서버 미연결 — 로컬 폴백 */
+    }
+    hydratedScopes.add(scope)
+    return entries.value
+  })().finally(() => {
+    if (hydratePromiseByScope.get(scope) === p) hydratePromiseByScope.delete(scope)
+  })
+  hydratePromiseByScope.set(scope, p)
+  return p
 }
 
 /** @param {string} scope */

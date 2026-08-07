@@ -11,7 +11,7 @@ export const COMBINED_COMMENTS_CHANNEL = {
   tabLabel: '통합코멘트',
   reportTitle: '통합 담당 코멘트',
   description:
-    '베스트하임·사본느리·파워프라이스·마케팅 코멘트를 날짜별로 저장합니다. 기간을 지정하면 그 구간의 일별 코멘트가 모두 표시됩니다.',
+    '베스트하임·사본느리·파워프라이스·폐쇄몰·마케팅 코멘트를 날짜별로 저장합니다. 기간을 지정하면 그 구간의 일별 코멘트가 모두 표시됩니다.',
   commentsOnly: true,
   manualOnly: true,
   modes: [

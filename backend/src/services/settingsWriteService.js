@@ -26,9 +26,14 @@ export function formatSettingResponse(row) {
   }
 }
 
-export async function getAppSetting(scope, kind) {
+/**
+ * @param {string} scope
+ * @param {string} kind
+ * @param {{ omitSources?: boolean }} [opts]
+ */
+export async function getAppSetting(scope, kind, opts = {}) {
   assertScopeKind(scope, kind)
-  const row = await getSetting(scope, kind)
+  const row = await getSetting(scope, kind, opts)
   if (!row) {
     return { ok: true, scope, kind, data: null, updatedAt: null }
   }

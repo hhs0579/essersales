@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import { readPlatformDailyFile } from '../utils/platformOrderParser.js'
+import { parsePlatformDailyInWorker } from '../utils/parseExcelInWorker.js'
 import { OWN_MALL_AIMWEB_UPLOAD_ERROR } from '../utils/ownMallSalesParser.js'
 import {
   deleteUploadAndRecords,
@@ -76,7 +76,7 @@ async function onFilesSelected(fileList) {
         format,
         salesMethod,
         emptyHint = '',
-      } = await readPlatformDailyFile(file, platform.value)
+      } = await parsePlatformDailyInWorker(file, platform.value)
 
       progressMessage.value = `${filePrefix}데이터 정제 및 분석 중...`
       await yieldTick()

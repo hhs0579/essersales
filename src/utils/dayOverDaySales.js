@@ -556,7 +556,7 @@ export function buildDayOverDayExcelRows(dayOverDayRows, referenceDate = '', opt
           '구분',
           salesComparisonCurrentColumnLabel(mode),
           salesComparisonPrevColumnLabel(mode, first),
-          salesComparisonChangeColumnLabel(mode),
+          `${salesComparisonChangeColumnLabel(mode)} 증감액`,
           `${salesComparisonChangeColumnLabel(mode)}(%)`,
           '추이',
         ]

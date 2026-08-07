@@ -1,6 +1,6 @@
 /**
- * 스토어명 표시·집계용 정규화
- * — 통합 리포트에서 동일 브랜드의 다른 표기를 하나로 묶음
+ * 스토어명 집계용 정규화 (통합 리포트·스토어별 합산)
+ * — 상세 표 표시에는 쓰지 말 것 (원문 스토어명 유지)
  */
 
 function compactLabel(s) {
@@ -20,8 +20,13 @@ export function normalizeStoreLabel(raw, row = null) {
     return '베스트하임'
   }
 
-  if (/사본느리/i.test(compact) || /드니옹/i.test(compact) || /에쎄르/i.test(compact)) {
+  // 사본느리 구 표기만 묶음. 에쎄르(특판·브랜드)는 사본느리로 바꾸지 않음
+  if (/사본느리/i.test(compact) || /드니옹/i.test(compact)) {
     return '사본느리'
+  }
+
+  if (/에쎄르/i.test(compact)) {
+    return '에쎄르'
   }
 
   return s

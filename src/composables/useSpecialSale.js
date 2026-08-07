@@ -134,10 +134,14 @@ function shouldFallbackToLocalStorage(err) {
   )
 }
 
-/** @param {string} scope */
-export async function hydrateSpecialSaleForScope(scope) {
+/**
+ * @param {string} scope
+ * @param {{ forceRefresh?: boolean }} [opts]
+ */
+export async function hydrateSpecialSaleForScope(scope, opts = {}) {
   const key = specialSaleScopeFor(scope)
   const store = ensureStore(scope)
+  if (!opts.forceRefresh && hydratedScopes.has(key)) return store
 
   try {
     const res = await fetchAppSetting(key, SPECIAL_SALE_SETTING_KIND)

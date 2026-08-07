@@ -13,6 +13,7 @@ import {
   fetchUploads,
   savePlatformDailyUpload,
 } from '../services/salesApi.js'
+import VirtualScrollTableBody from './VirtualScrollTableBody.vue'
 
 const props = defineProps({
   /** 'esser' | 'bestheim' */
@@ -184,8 +185,9 @@ async function confirmUpload() {
       · 선택:
       <code>a옵션</code>
       <code>a브랜드</code>
-      · a판매처 = 특판 판매처명 (대시보드에 「{{ brandDef.dataSourceLabel }}(판매처)」로 표시) · a원가는
-      개당 원가 (마진 = 결제가 − 배송비 − 수수료 − 원가×수량)
+      · a판매처 = 특판 판매처명 (대시보드에 「{{ brandDef.dataSourceLabel }}(판매처)」로 표시) · a수수료는
+      금액(<code>12500</code>) 또는 비율(<code>25%</code>·엑셀 퍼센트 셀) · a원가는 개당 원가
+      (마진 = 결제가 − 배송비 − 수수료 − 원가×수량)
     </p>
 
     <ExcelUpload
@@ -223,25 +225,25 @@ async function confirmUpload() {
       </div>
 
       <div class="table-wrap">
-        <table>
-          <thead>
+        <VirtualScrollTableBody :rows="previewRows" :threshold="60" class="preview-table">
+          <template #head>
             <tr>
               <th>상태</th>
               <th>날짜</th>
               <th>판매처</th>
               <th>브랜드</th>
-              <th>상품명</th>
-              <th>옵션</th>
-              <th>수량</th>
-              <th>결제가</th>
-              <th>배송비</th>
-              <th>수수료</th>
-              <th>원가</th>
+              <th class="name">상품명</th>
+              <th class="name">옵션</th>
+              <th class="num">수량</th>
+              <th class="num">결제가</th>
+              <th class="num">배송비</th>
+              <th class="num">수수료</th>
+              <th class="num">원가</th>
               <th>오류</th>
             </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(r, i) in previewRows" :key="i" :class="statusClass(r.status)">
+          </template>
+          <template #row="{ row: r }">
+            <tr :class="statusClass(r.status)">
               <td>{{ statusLabel(r.status) }}</td>
               <td>{{ r.dateYmd || '-' }}</td>
               <td>{{ r.seller || '-' }}</td>
@@ -255,8 +257,8 @@ async function confirmUpload() {
               <td class="num">{{ r.unitCost != null ? formatWon(r.unitCost) : '-' }}</td>
               <td class="err-cell">{{ r.errorMessage || '' }}</td>
             </tr>
-          </tbody>
-        </table>
+          </template>
+        </VirtualScrollTableBody>
       </div>
     </div>
   </section>
@@ -347,6 +349,7 @@ td {
   border-bottom: 1px solid #eef0f3;
   text-align: left;
   white-space: nowrap;
+  vertical-align: middle;
 }
 th {
   position: sticky;
@@ -354,11 +357,13 @@ th {
   background: #f8f9fb;
   z-index: 1;
 }
+th.name,
 td.name {
   max-width: 14rem;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+th.num,
 td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;

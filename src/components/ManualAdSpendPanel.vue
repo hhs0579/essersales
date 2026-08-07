@@ -8,7 +8,7 @@ import {
   manualAdEntryVisibleInPanel,
   manualAdHasDateFilter,
 } from '../utils/manualAdSpend.js'
-import { formatManualAdAmount } from '../utils/parseAmount.js'
+import { formatManualAdAmount, parseAmount } from '../utils/parseAmount.js'
 import { formatNaverAdImportMessage } from '../utils/naverAdCenterParser.js'
 import { MANUAL_AD_SOURCE_OPTIONS, normalizeManualAdSource } from '../config/manualAdSpend.js'
 import { maxReportDateYmd } from '../utils/reportDateRange.js'
@@ -59,15 +59,23 @@ const singleAutoDate = computed(() =>
   periodMode.value === 'monthly' ? singleFilterMonthStart.value : singleFilterDate.value,
 )
 
-/** 새 행·빈 일자 드롭다운 기본값 */
-const entryDateSuggest = computed(() => {
+/**
+ * 새 행에만 넣는 명시적 기본 일자.
+ * 기간 필터(1~7일)일 때 dateFrom(1일)을 쓰면 안 됨 — 종료일(최근일) 또는 단일일만.
+ */
+const newEntryDefaultDate = computed(() => {
   if (singleAutoDate.value) return singleAutoDate.value
   const { dateFrom, dateTo, year, month } = props.filterCtx
-  if (periodMode.value === 'monthly' && year && month) {
-    return `${year}-${String(month).padStart(2, '0')}-01`
+  if (periodMode.value === 'monthly') {
+    if (year && month) return `${year}-${String(month).padStart(2, '0')}-01`
+    if (dateFrom && dateTo && dateFrom.slice(0, 7) === dateTo.slice(0, 7)) {
+      return `${dateFrom.slice(0, 7)}-01`
+    }
+    return ''
   }
-  if (dateFrom) return dateFrom
+  // 일별 기간: 시작일이 아니라 종료일을 기본값으로 (최근 일자 기입 UX)
   if (dateTo) return dateTo
+  if (dateFrom) return dateFrom
   return maxReportDateYmd()
 })
 
@@ -79,7 +87,7 @@ watch(singleAutoDate, (date) => {
 })
 
 function onAddEntry() {
-  addEntry(singleAutoDate.value || '', newEntrySource.value)
+  addEntry(newEntryDefaultDate.value || '', newEntrySource.value)
 }
 
 function onSourceChange(row, e) {
@@ -140,6 +148,18 @@ async function onSave() {
       normalizeAmountField(row, 'adSpend')
       normalizeAmountField(row, 'adSales')
     }
+    const missingDate = entries.value.filter(
+      (row) =>
+        (parseAmount(row.adSpend) > 0 || parseAmount(row.adSales) > 0) &&
+        !String(row.date || '').trim(),
+    )
+    if (missingDate.length) {
+      saveErr.value =
+        periodMode.value === 'monthly'
+          ? '광고비·전환매출이 있는 행에 월을 선택하세요. (빈 월은 저장되지 않습니다)'
+          : '광고비·전환매출이 있는 행에 일자를 선택하세요. (빈 일자는 저장되지 않습니다)'
+      return
+    }
     await saveEntries()
     saveMsg.value = '서버에 저장되었습니다.'
   } catch (e) {
@@ -194,7 +214,10 @@ async function onNaverAdFileChange(e) {
         <strong v-else-if="filterCtx.dateTo">~ {{ filterCtx.dateTo }}</strong>
         에 맞는 행만 표시합니다.
         <template v-if="periodMode === 'monthly'"> 월은 <strong>년 · 월</strong> 드롭다운으로 지정하세요.</template>
-        <template v-else> 일자는 <strong>년 · 월 · 일</strong> 드롭다운으로 지정하세요.</template>
+        <template v-else>
+          일자는 <strong>년 · 월 · 일</strong>로 지정하세요. 행 추가 시 기본값은 조회
+          <strong>종료일</strong>입니다 (시작일로 바뀌지 않음).
+        </template>
       </span>
       <span v-if="hiddenEntryCount > 0" class="filter-date-hint muted-hint">
         조회 기간 밖 {{ hiddenEntryCount }}건은 숨겨져 있습니다. (저장 데이터는 유지)
@@ -260,9 +283,8 @@ async function onNaverAdFileChange(e) {
                 <YmMonthFields
                   v-if="periodMode === 'monthly'"
                   v-model="row.date"
-                  :suggest-date="entryDateSuggest"
                 />
-                <YmdDateFields v-else v-model="row.date" :suggest-date="entryDateSuggest" />
+                <YmdDateFields v-else v-model="row.date" />
               </td>
               <td class="col-kind">
                 <select

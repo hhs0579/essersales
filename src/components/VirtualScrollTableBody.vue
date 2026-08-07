@@ -6,8 +6,9 @@ defineOptions({ inheritAttrs: false })
 const props = defineProps({
   rows: { type: Array, default: () => [] },
   rowHeight: { type: Number, default: 40 },
-  threshold: { type: Number, default: 200 },
-  overscan: { type: Number, default: 8 },
+  /** Phase 4: 판매 상세는 수백 건부터 가상화 (이전 200) */
+  threshold: { type: Number, default: 80 },
+  overscan: { type: Number, default: 10 },
 })
 
 const rootRef = ref(null)

@@ -18,15 +18,6 @@ import {
 
 /** @typedef {import('../config/manualAdSpend.js').ManualAdEntry} ManualAdEntry */
 
-/**
- * KPI·합계 반영 여부 — 일자가 조회 기간 안에 있을 때만 true
- * @param {ManualAdEntry} entry
- * @param {{ dateFrom?: string, dateTo?: string, year?: string, month?: string }} filterCtx
- */
-function entryHasManualAdAmount(entry) {
-  return parseAmount(entry?.adSpend) > 0 || parseAmount(entry?.adSales) > 0
-}
-
 /** 수동 광고 일자 → YYYY-MM-DD (일별 집계·표시용) */
 export function resolveManualAdEntryYmd(entry, filterCtx = {}) {
   const raw = String(entry?.date || '').trim()
@@ -37,11 +28,15 @@ export function resolveManualAdEntryYmd(entry, filterCtx = {}) {
   return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
 }
 
+/**
+ * KPI·합계 반영 여부 — 유효한 일자가 조회 기간 안에 있을 때만 true
+ * @param {ManualAdEntry} entry
+ * @param {{ dateFrom?: string, dateTo?: string, year?: string, month?: string }} filterCtx
+ */
 export function manualAdEntryInView(entry, filterCtx) {
   const ymd = resolveManualAdEntryYmd(entry, filterCtx)
-  if (!ymd) {
-    return entryHasManualAdAmount(entry) && manualAdHasDateFilter(filterCtx)
-  }
+  // 날짜 미입력·파싱 실패 행은 KPI·스토어·일별 집계에서 제외 (일별·외부광고 표와 동일)
+  if (!ymd) return false
 
   if (filterCtx?.year && ymd.slice(0, 4) !== String(filterCtx.year)) return false
   if (filterCtx?.month && parseInt(ymd.slice(5, 7), 10) !== Number(filterCtx.month)) return false
@@ -118,12 +113,13 @@ export function manualAdHasDateFilter(filterCtx) {
 }
 
 /**
- * 입력 패널 표시 — 기간 밖 일자는 숨기고, 날짜 미입력 행은 편집용으로 유지
+ * 입력 패널 표시 — 기간 밖 일자는 숨기고, 날짜 미입력·파싱 실패 행은 수정용으로 유지
  * @param {ManualAdEntry} entry
  * @param {object} filterCtx
  */
 export function manualAdEntryVisibleInPanel(entry, filterCtx) {
-  if (!entry?.date) return true
+  const ymd = resolveManualAdEntryYmd(entry, filterCtx)
+  if (!ymd) return true
   return manualAdEntryInView(entry, filterCtx)
 }
 

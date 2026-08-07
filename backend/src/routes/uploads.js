@@ -4,6 +4,7 @@ import { deleteUpload } from '../services/uploadsWriteService.js'
 import { processExcelUpload } from '../services/uploadExcelWriteService.js'
 import { excelUploadMiddleware } from '../middleware/uploadMulter.js'
 import { decodeMultipartFilename } from '../../../src/utils/textEncoding.js'
+import { invalidateKpiCache } from './kpi.js'
 
 export const uploadsRouter = Router()
 
@@ -34,6 +35,7 @@ uploadsRouter.post('/excel', (req, res, next) => {
       if (result.duplicate) {
         return res.status(409).json(result)
       }
+      invalidateKpiCache()
       res.json(result)
     } catch (e) {
       if (e.status === 400) {
@@ -59,6 +61,7 @@ uploadsRouter.get('/:id', async (req, res, next) => {
 uploadsRouter.delete('/:id', async (req, res, next) => {
   try {
     const result = await deleteUpload(req.params.id)
+    invalidateKpiCache()
     res.json(result)
   } catch (err) {
     if (err.status === 404) {

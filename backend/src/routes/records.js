@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { listRecords } from '../repositories/recordsRepository.js'
 import { patchSalesRecord, deleteSalesRecord } from '../services/recordsWriteService.js'
+import { invalidateKpiCache } from './kpi.js'
 
 export const recordsRouter = Router()
 
@@ -16,6 +17,7 @@ recordsRouter.get('/', async (req, res, next) => {
 recordsRouter.patch('/:id', async (req, res, next) => {
   try {
     const result = await patchSalesRecord(req.params.id, req.body)
+    invalidateKpiCache()
     res.json(result)
   } catch (err) {
     if (err.status === 404) {
@@ -31,6 +33,7 @@ recordsRouter.patch('/:id', async (req, res, next) => {
 recordsRouter.delete('/:id', async (req, res, next) => {
   try {
     const result = await deleteSalesRecord(req.params.id)
+    invalidateKpiCache()
     res.json(result)
   } catch (err) {
     if (err.status === 404) {

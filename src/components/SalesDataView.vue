@@ -12,6 +12,7 @@ import {
 import { formatCellValue, isNumericColumn, resolveDetailField } from '../utils/formatDisplay.js'
 import { useSalesData } from '../composables/useSalesData.js'
 import { isPgExportMode } from '../services/exportApiMode.js'
+import { isServerKpiOnly } from '../services/kpiSource.js'
 import {
   getChannelByScope,
   usesEsserDashboard,
@@ -287,12 +288,18 @@ const showPeriodDashboardSection = computed(
     (!loading.value || serverKpiLoaded.value),
 )
 
-/** PG export는 API가 DB에서 직접 조회 — 상세 캐시 없어도 다운로드 가능 */
-const canDownloadDashboard = computed(
-  () =>
-    filteredDetailForCharts.value.length > 0 ||
-    (isPgExportMode() && hasAnyData.value),
-)
+/** PG export는 API가 DB에서 직접 조회 — 상세 캐시 없어도 다운로드 가능.
+ * 서버 KPI 모드에서는 filteredDetailForCharts를 건드리지 않음 (날짜 변경 시 전량 필터 렉 방지). */
+const canDownloadDashboard = computed(() => {
+  if (isPgExportMode() && hasAnyData.value) return true
+  if (
+    usesServerKpiMode.value &&
+    (serverKpiLoaded.value || serverKpiBucket.value != null || hasAnyData.value)
+  ) {
+    return true
+  }
+  return filteredDetailForCharts.value.length > 0
+})
 
 const tableEmptyHint = computed(() => {
   if (activeTab.value === 'returns') {
@@ -392,14 +399,14 @@ watch(
   () => applyMonthlyPeriodFromFilters(),
 )
 
-/** 특판·전월대비 기준월 (YYYY-MM) */
+/** 특판·전월대비 기준월 (YYYY-MM) — 필터된 detail 전량 조회 금지 */
 const specialSaleMonthKey = computed(() => {
   const y = String(filters.value.year || '').trim()
   const mo = String(filters.value.month || '').trim()
   if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
     return `${y}-${String(mo).padStart(2, '0')}`
   }
-  return resolveReferenceMonthKey(filteredDetailForCharts.value, manualFilterCtx.value) || ''
+  return resolveReferenceMonthKey(scopedSaleDetails.value, { period: 'monthly' }) || ''
 })
 
 function buildSpecialSaleContext() {
@@ -416,7 +423,9 @@ function buildSpecialSaleContext() {
 
 /** 광고·조회 조건 변경 시 KPI 재계산 부담 완화 */
 const MANUAL_AD_DASHBOARD_DEBOUNCE_MS = 320
-const DASHBOARD_KPI_DEBOUNCE_MS = 380
+const DASHBOARD_KPI_DEBOUNCE_MS = 450
+/** 통합 브랜드 세그먼트 — 필터 변경 직후 전량 재집계 대신 idle/debounce */
+const COMBINED_SEGMENT_SYNC_DEBOUNCE_MS = 520
 
 const manualAdEntriesForDashboard = ref(manualAdEntries.value)
 let manualAdDashboardTimer = null
@@ -431,11 +440,30 @@ watch(
   { deep: true },
 )
 
-const dashboardKpiRecords = ref(filteredDetailForCharts.value)
-const dashboardKpiPlatformSplit = ref(dashboardPlatformSplitRecords.value)
-const dashboardKpiDayOverDay = ref(dashboardDayOverDayRecords.value)
+/** setup 시점에 전량 필터하지 않음 — sync 때만 채움 */
+const dashboardKpiRecords = ref([])
+const dashboardKpiPlatformSplit = ref([])
+const dashboardKpiDayOverDay = ref([])
 const dashboardKpiFilterCtx = ref({ ...manualFilterCtx.value })
 const dashboardKpiManualAdByChannel = ref(buildManualAdByChannel(manualAdEntriesForDashboard.value))
+/** 통합: 세그먼트 재집계 대기 중 (서버 플랫폼 행으로 임시 표시) */
+const combinedSegmentRefreshPending = ref(false)
+
+function applyLightDashboardMeta() {
+  dashboardKpiManualAdByChannel.value = buildManualAdByChannel(manualAdEntriesForDashboard.value)
+  const ssCtx = buildSpecialSaleContext()
+  dashboardKpiFilterCtx.value = {
+    ...manualFilterCtx.value,
+    specialSale: ssCtx.specialSale,
+    specialSaleByMonth: ssCtx.specialSaleByMonth,
+    combinedComments: isCombined.value
+      ? getCombinedCommentsSnapshot(props.scope, {
+          dateFrom: filters.value.dateFrom || '',
+          dateTo: filters.value.dateTo || '',
+        })
+      : null,
+  }
+}
 
 function syncDashboardKpiSnapshot() {
   const ssCtx = buildSpecialSaleContext()
@@ -462,22 +490,49 @@ function syncDashboardKpiSnapshot() {
   )
   dashboardKpiPlatformSplit.value = dashboardPlatformSplitRecords.value
   dashboardKpiDayOverDay.value = dashboardDayOverDayRecords.value
-  dashboardKpiFilterCtx.value = {
-    ...manualFilterCtx.value,
-    specialSale: ssCtx.specialSale,
-    specialSaleByMonth: ssCtx.specialSaleByMonth,
-    combinedComments: isCombined.value
-      ? getCombinedCommentsSnapshot(props.scope, {
-          dateFrom: filters.value.dateFrom || '',
-          dateTo: filters.value.dateTo || '',
-        })
-      : null,
-  }
+  dashboardKpiFilterCtx.value = filterCtx
   dashboardKpiManualAdByChannel.value = buildManualAdByChannel(manualAdEntriesForDashboard.value)
+  combinedSegmentRefreshPending.value = false
+}
+
+/**
+ * 서버 KPI 대시보드만 클라 detail 스냅샷 생략.
+ * 통합·직접입력은 세그먼트/수기 행을 위해 스냅샷 필수.
+ */
+function shouldSkipClientKpiSnapshot() {
+  if (!usesServerKpiMode.value || !isServerKpiOnly()) return false
+  if (isPowerPriceScope.value || isCoupang1pScope.value || isCombined.value) return false
+  return serverKpiLoaded.value || serverKpiBucket.value != null
+}
+
+function usesDeferredCombinedSegmentSync() {
+  return isCombined.value && usesServerKpiMode.value && isServerKpiOnly()
 }
 
 let dashboardKpiTimer = null
 function scheduleDashboardKpiRefresh() {
+  if (shouldSkipClientKpiSnapshot()) {
+    applyLightDashboardMeta()
+    return
+  }
+  if (usesDeferredCombinedSegmentSync()) {
+    // 날짜 변경 직후 buildCombined 금지 — 로딩 배너 + 서버 행으로 전환 후 idle 동기화
+    applyLightDashboardMeta()
+    combinedSegmentRefreshPending.value = true
+    if (dashboardKpiTimer) clearTimeout(dashboardKpiTimer)
+    dashboardKpiTimer = setTimeout(() => {
+      const run = () => {
+        syncDashboardKpiSnapshot()
+        dashboardKpiTimer = null
+      }
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(run, { timeout: 1200 })
+      } else {
+        run()
+      }
+    }, COMBINED_SEGMENT_SYNC_DEBOUNCE_MS)
+    return
+  }
   if (dashboardKpiTimer) clearTimeout(dashboardKpiTimer)
   dashboardKpiTimer = setTimeout(() => {
     syncDashboardKpiSnapshot()
@@ -485,11 +540,12 @@ function scheduleDashboardKpiRefresh() {
   }, DASHBOARD_KPI_DEBOUNCE_MS)
 }
 
+/**
+ * 무거운 filteredDetail* computed를 watch 소스에 넣지 않음.
+ * (watch 평가만으로도 날짜 변경마다 전량 필터가 돌았음)
+ */
 watch(
   [
-    filteredDetailForCharts,
-    dashboardPlatformSplitRecords,
-    dashboardDayOverDayRecords,
     manualFilterCtx,
     manualAdEntriesForDashboard,
     () => props.scope,
@@ -500,32 +556,71 @@ watch(
   scheduleDashboardKpiRefresh,
 )
 
+const SERVER_KPI_RELOAD_DEBOUNCE_MS = 400
+let serverKpiReloadTimer = null
+
+function reloadServerKpiImmediate() {
+  if (serverKpiReloadTimer) {
+    clearTimeout(serverKpiReloadTimer)
+    serverKpiReloadTimer = null
+  }
+  if (usesServerKpiMode.value) reloadServerKpi()
+}
+
+function scheduleServerKpiReload() {
+  if (!usesServerKpiMode.value) return
+  if (serverKpiReloadTimer) clearTimeout(serverKpiReloadTimer)
+  serverKpiReloadTimer = setTimeout(() => {
+    serverKpiReloadTimer = null
+    reloadServerKpi()
+  }, SERVER_KPI_RELOAD_DEBOUNCE_MS)
+}
+
+// 탭(scope) 전환 — 즉시
+watch(
+  () => props.scope,
+  () => {
+    reloadServerKpiImmediate()
+  },
+)
+
+// 필터·수기 데이터 변경 — debounce (연속 입력 폭주 방지)
 watch(
   [
     manualFilterCtx,
-    () => props.scope,
     ownMallManualDetailRecords,
     powerPriceDetailRecords,
     coupang1pRocketDetailRecords,
   ],
-  () => {
-    if (usesServerKpiMode.value) {
-      reloadServerKpi()
-    }
-  },
+  scheduleServerKpiReload,
   { deep: true },
 )
 
 watch(detailCacheLoaded, (loaded) => {
+  // 통합: detail 도착 시 브랜드 세그먼트 스냅샷 갱신 (상단 KPI는 serverKpiBucket 유지)
   if (loaded && isCombined.value) {
-    syncDashboardKpiSnapshot()
+    scheduleDashboardKpiRefresh()
   }
 })
 
 onMounted(async () => {
   await ensureDashboardReady(props.scope)
   ensureDefaultReportMonth()
-  syncDashboardKpiSnapshot()
+  if (shouldSkipClientKpiSnapshot()) {
+    applyLightDashboardMeta()
+  } else if (usesDeferredCombinedSegmentSync()) {
+    applyLightDashboardMeta()
+    combinedSegmentRefreshPending.value = !detailCacheLoaded.value || !dashboardKpiRecords.value.length
+    // 첫 페인트(서버 KPI) 후 idle에 세그먼트 집계 — 탭 진입 렉 완화
+    const run = () => scheduleDashboardKpiRefresh()
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(run, { timeout: 900 })
+    } else {
+      setTimeout(run, 120)
+    }
+  } else {
+    scheduleDashboardKpiRefresh()
+  }
 })
 
 watch(scopedSaleDetails, () => {
@@ -552,7 +647,26 @@ async function retryDetailCacheLoad() {
 onUnmounted(() => {
   if (manualAdDashboardTimer) clearTimeout(manualAdDashboardTimer)
   if (dashboardKpiTimer) clearTimeout(dashboardKpiTimer)
+  if (serverKpiReloadTimer) clearTimeout(serverKpiReloadTimer)
 })
+
+/** 통합 브랜드 세그먼트 대기 (쿠팡/스스 임시 표시 · 날짜 변경 재집계 중) */
+const combinedSegmentsLoading = computed(
+  () =>
+    isCombined.value &&
+    usesServerKpiMode.value &&
+    (detailCacheLoading.value ||
+      !detailCacheLoaded.value ||
+      combinedSegmentRefreshPending.value),
+)
+
+/** 접힌 데이터 섹션 actions에서 sortedFilteredRecords 평가 금지 */
+const hasTableRowsHint = computed(
+  () =>
+    scopedSaleDetails.value.length > 0 ||
+    scopedReturnDetails.value.length > 0 ||
+    (detailCacheLoaded.value && scopedDetailRecords.value.length > 0),
+)
 
 const dataSectionSubtitle = computed(() => {
   const n = scopedSaleDetails.value.length
@@ -701,10 +815,16 @@ const monthlyYearOptions = computed(() => {
       <button
         type="button"
         class="btn btn-success btn-sm"
-        :disabled="saving || !canDownloadDashboard"
+        :disabled="saving || !canDownloadDashboard || combinedSegmentsLoading"
         @click="downloadDashboardExport"
       >
-        {{ saving ? '엑셀 생성 중…' : '대시보드 엑셀 다운로드' }}
+        {{
+          saving
+            ? '엑셀 생성 중…'
+            : combinedSegmentsLoading
+              ? '상세 로드 중…'
+              : '대시보드 엑셀 다운로드'
+        }}
       </button>
     </template>
     <SalesPeriodDashboard
@@ -727,6 +847,7 @@ const monthlyYearOptions = computed(() => {
       :server-kpi-bucket="usesServerKpiMode ? serverKpiBucket : null"
       :server-platform-kpi-rows="usesServerKpiMode ? serverPlatformKpiRows : []"
       :server-day-over-day-rows="usesServerKpiMode ? serverDayOverDayRows : []"
+      :segments-loading="combinedSegmentsLoading"
       :hidden-kpi-keys="
         isPowerPriceScope
           ? POWER_PRICE_HIDDEN_KPI_KEYS
@@ -750,7 +871,7 @@ const monthlyYearOptions = computed(() => {
       <button
         type="button"
         class="btn btn-outline btn-sm"
-        :disabled="!sortedFilteredRecords.length"
+        :disabled="!hasTableRowsHint || detailCacheLoading"
         @click="downloadCurrentTableExport"
       >
         현재 표 엑셀 다운로드

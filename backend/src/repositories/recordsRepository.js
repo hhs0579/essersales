@@ -8,6 +8,18 @@ import {
   parseOrder,
   trimFilter,
 } from '../utils/queryHelpers.js'
+import { allowedUploadKindsForScope } from '../utils/scopeFilter.js'
+
+/** lean: 화면·집계에 필요한 data 키만 (전체 JSONB 제외).
+ * 통합 KPI 세그먼트는 프론트에서 include_data=full 사용. */
+const LEAN_DATA_SQL = `jsonb_strip_nulls(jsonb_build_object(
+  'date', data->'date',
+  'contextDate', data->'contextDate',
+  'deliveryMethod', data->'deliveryMethod',
+  '배송구분', data->'배송구분',
+  'sourceFileName', data->'sourceFileName',
+  'channel', data->'channel'
+))`
 
 const SORT_WHITELIST = [
   'order_date',
@@ -20,7 +32,10 @@ const SORT_WHITELIST = [
   'upload_kind',
 ]
 
-function mapRecordRow(row, { includeData = false } = {}) {
+/**
+ * @param {'none' | 'lean' | 'full'} mode
+ */
+function mapRecordRow(row, { dataMode = 'none' } = {}) {
   const item = {
     id: row.id,
     uploadId: row.upload_id,
@@ -46,10 +61,21 @@ function mapRecordRow(row, { includeData = false } = {}) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
-  if (includeData && row.data) {
+  if (dataMode !== 'none' && row.data) {
     item.data = row.data
   }
   return item
+}
+
+/**
+ * @param {string | undefined} raw
+ * @returns {'none' | 'lean' | 'full'}
+ */
+function parseIncludeDataMode(raw) {
+  const v = String(raw ?? '').trim().toLowerCase()
+  if (v === '1' || v === 'true' || v === 'full') return 'full'
+  if (v === 'lean') return 'lean'
+  return 'none'
 }
 
 /**
@@ -70,9 +96,10 @@ export function parseRecordsQuery(query = {}) {
     transactionType: trimFilter(query.transaction_type),
     uploadKind: trimFilter(query.upload_kind),
     uploadFormat: trimFilter(query.upload_format),
+    scope: trimFilter(query.scope),
     sort: parseSort(query.sort, SORT_WHITELIST, 'order_date'),
     order: parseOrder(query.order),
-    includeData: query.include_data === '1' || query.include_data === 'true',
+    dataMode: parseIncludeDataMode(query.include_data),
   }
 }
 
@@ -129,8 +156,33 @@ function buildRecordsWhere(filters) {
     params.push(filters.recordType)
   }
 
+  if (filters.scope) {
+    const kinds = allowedUploadKindsForScope(filters.scope)
+    if (kinds.length) {
+      clauses.push(`upload_kind = ANY($${i++}::text[])`)
+      params.push(kinds)
+    } else if (filters.scope === 'sales_report') {
+      clauses.push(
+        `(upload_kind IS NULL OR upload_kind = '' OR NOT (upload_kind = ANY($${i++}::text[])))`,
+      )
+      params.push([
+        'platform_daily',
+        'platform_monthly',
+        'sales_daily_b',
+        'sales_monthly_b',
+        'power_price_daily',
+      ])
+    }
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   return { where, params }
+}
+
+function dataSelectSql(dataMode) {
+  if (dataMode === 'full') return ', data'
+  if (dataMode === 'lean') return `, ${LEAN_DATA_SQL} AS data`
+  return ''
 }
 
 export async function listRecords(query) {
@@ -140,6 +192,7 @@ export async function listRecords(query) {
   const offset = parseOffset(filters.page, filters.limit)
   const sortCol = filters.sort
   const sortDir = filters.order
+  const dataMode = filters.dataMode
 
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS total FROM sales_records ${where}`,
@@ -164,7 +217,7 @@ export async function listRecords(query) {
        sales, sales_qty, net_profit, ad_spend,
        transaction_type, upload_kind, upload_format,
        created_at, updated_at
-       ${filters.includeData ? ', data' : ''}
+       ${dataSelectSql(dataMode)}
      FROM sales_records ${where}
      ORDER BY ${sortCol} ${sortDir} NULLS LAST, id ASC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -172,7 +225,7 @@ export async function listRecords(query) {
   )
 
   return {
-    items: listRes.rows.map((r) => mapRecordRow(r, { includeData: filters.includeData })),
+    items: listRes.rows.map((r) => mapRecordRow(r, { dataMode })),
     page: filters.page,
     limit: filters.limit,
     total,

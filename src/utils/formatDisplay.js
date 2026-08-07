@@ -3,8 +3,6 @@ import { esserRowValues, resolveRowAdSpend } from './esserMetrics.js'
 import { extractDeliveryFromRawRow, getSalesMethod } from './salesMethodDetect.js'
 import { resolveRecordPlatform } from './platformDetect.js'
 import { isOwnMallRecord, resolveOwnMallChannelFee } from '../config/ownMall.js'
-import { normalizeStoreLabel } from './storeLabel.js'
-
 /** 천 단위 콤마 표시 대상 */
 export const AMOUNT_KEYS = new Set([
   'actualPayment',
@@ -73,8 +71,8 @@ export function resolveDetailField(row, key) {
     case 'dataSourceLabel':
       return row.dataSourceLabel || ''
     case 'brand': {
-      const raw = row.brand || row.storeName || ''
-      return raw ? normalizeStoreLabel(raw, row) : ''
+      // 상세 표는 원문 유지 (에쎄르→사본느리 등 집계용 정규화 금지)
+      return String(row.brand || row.storeName || '').trim()
     }
     case 'option':
       return row.option || row.optionName || ''
@@ -104,8 +102,8 @@ export function resolveDetailField(row, key) {
     case 'salePrice':
       return row.salePrice ?? row.sale_price ?? ''
     case 'storeName': {
-      const raw = row.storeName ?? row.store_name ?? row.brand ?? ''
-      return raw ? normalizeStoreLabel(raw, row) : ''
+      // 상세 표·필드 정규화는 원문 스토어명 (집계용 normalizeStoreLabel 미적용)
+      return String(row.storeName ?? row.store_name ?? row.brand ?? '').trim()
     }
     case 'channelFee':
     case 'commission': {

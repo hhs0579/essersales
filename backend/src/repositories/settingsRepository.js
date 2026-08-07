@@ -1,11 +1,34 @@
 import { getPool } from '../db/pool.js'
 import { trimFilter } from '../utils/queryHelpers.js'
 
-function mapSettingRow(row) {
+/**
+ * own_mall_manual — salesSourceFiles dataBase64 제거 (메타만)
+ * @param {unknown} data
+ */
+export function omitOwnMallSourcePayloads(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data
+  const o = /** @type {Record<string, unknown>} */ (data)
+  if (!Array.isArray(o.salesSourceFiles)) return data
+  return {
+    ...o,
+    salesSourceFiles: o.salesSourceFiles.map((item) => {
+      if (!item || typeof item !== 'object') return item
+      const s = /** @type {Record<string, unknown>} */ (item)
+      const { dataBase64: _drop, ...meta } = s
+      return meta
+    }),
+  }
+}
+
+function mapSettingRow(row, { omitSources = false } = {}) {
+  let data = row.data
+  if (omitSources && row.kind === 'own_mall_manual') {
+    data = omitOwnMallSourcePayloads(data)
+  }
   return {
     scope: row.scope,
     kind: row.kind,
-    data: row.data,
+    data,
     updatedAt: row.updated_at,
     dataSize: row.data_size != null ? Number(row.data_size) : undefined,
   }
@@ -14,8 +37,9 @@ function mapSettingRow(row) {
 /**
  * @param {string} scope
  * @param {string} kind
+ * @param {{ omitSources?: boolean }} [opts]
  */
-export async function getSetting(scope, kind) {
+export async function getSetting(scope, kind, opts = {}) {
   const pool = getPool()
   const res = await pool.query(
     `SELECT scope, kind, data, updated_at,
@@ -24,7 +48,7 @@ export async function getSetting(scope, kind) {
      WHERE scope = $1 AND kind = $2`,
     [scope, kind],
   )
-  return res.rows[0] ? mapSettingRow(res.rows[0]) : null
+  return res.rows[0] ? mapSettingRow(res.rows[0], opts) : null
 }
 
 /**
@@ -52,9 +76,17 @@ export async function upsertSetting(scope, kind, data) {
  * @param {Record<string, string | undefined>} query
  */
 export function parseSettingsQuery(query = {}) {
+  const omitRaw = String(query.omit_sources ?? query.include_sources ?? '').trim().toLowerCase()
+  const omitSources =
+    omitRaw === '1' ||
+    omitRaw === 'true' ||
+    omitRaw === 'yes' ||
+    (query.include_sources != null &&
+      ['0', 'false', 'no'].includes(String(query.include_sources).trim().toLowerCase()))
   return {
     scope: trimFilter(query.scope),
     kind: trimFilter(query.kind),
+    omitSources,
   }
 }
 
@@ -84,7 +116,7 @@ export async function listSettings(query) {
   )
 
   return {
-    items: res.rows.map(mapSettingRow),
+    items: res.rows.map((r) => mapSettingRow(r, { omitSources: filters.omitSources })),
     total: res.rows.length,
   }
 }

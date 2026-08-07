@@ -9,35 +9,53 @@ import {
   pgFetchKpiCompareYesterday,
 } from './pgApiClient.js'
 
-export async function fetchSalesRecords(recordType = 'detail') {
-  return pgFetchSalesRecords(recordType)
+/**
+ * @param {string} [recordType]
+ * @param {{
+ *   includeData?: 'none' | 'lean' | 'full' | boolean,
+ *   from?: string,
+ *   to?: string,
+ *   scope?: string,
+ * }} [opts]
+ */
+export async function fetchSalesRecords(recordType = 'detail', opts = {}) {
+  return pgFetchSalesRecords(recordType, opts)
 }
 
 export async function fetchUploads() {
   return pgFetchUploads()
 }
 
-export async function fetchAppSetting(scope, kind) {
-  return pgFetchAppSetting(scope, kind)
+/**
+ * @param {string} scope
+ * @param {string} kind
+ * @param {{ omitSources?: boolean }} [opts]
+ */
+export async function fetchAppSetting(scope, kind, opts = {}) {
+  return pgFetchAppSetting(scope, kind, opts)
 }
 
 /**
  * @param {Record<string, string>} [filters]
+ * @param {{ signal?: AbortSignal }} [opts]
  */
-export async function fetchKpiSummary(filters = {}) {
-  return pgFetchKpiSummary(filters)
+export async function fetchKpiSummary(filters = {}, opts = {}) {
+  return pgFetchKpiSummary(filters, opts)
 }
 
-export async function fetchKpiDaily(filters = {}) {
-  return pgFetchKpiDaily(filters)
+/** @param {Record<string, string>} [filters] @param {{ signal?: AbortSignal }} [opts] */
+export async function fetchKpiDaily(filters = {}, opts = {}) {
+  return pgFetchKpiDaily(filters, opts)
 }
 
-export async function fetchKpiByPlatform(filters = {}) {
-  return pgFetchKpiByPlatform(filters)
+/** @param {Record<string, string>} [filters] @param {{ signal?: AbortSignal }} [opts] */
+export async function fetchKpiByPlatform(filters = {}, opts = {}) {
+  return pgFetchKpiByPlatform(filters, opts)
 }
 
-export async function fetchKpiCompareYesterday(filters = {}) {
-  return pgFetchKpiCompareYesterday(filters)
+/** @param {Record<string, string>} [filters] @param {{ signal?: AbortSignal }} [opts] */
+export async function fetchKpiCompareYesterday(filters = {}, opts = {}) {
+  return pgFetchKpiCompareYesterday(filters, opts)
 }
 
 export { isServerKpi }

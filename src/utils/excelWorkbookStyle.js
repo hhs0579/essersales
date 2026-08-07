@@ -318,9 +318,34 @@ function isIntegratedDualBlockDataRow(row) {
   return false
 }
 
+/** 월별: 오른쪽에 증감액 열 포함(6열). 일/주: 5열 */
+function integratedDualBlockRightColCount(values) {
+  const title = cellText(values?.[4])
+  if (/전월\s*대비/.test(title)) return 6
+  // 헤더: … | 전월 대비[ 증감액] | 전월 대비(%) | 추이
+  const amountH = cellText(values?.[7])
+  const pctH = cellText(values?.[8])
+  if (/전월\s*대비/.test(amountH) && !/%/.test(amountH) && /%/.test(pctH)) return 6
+  // 데이터: E열 이후 6칸 (구분·당월·전월·증감액·%·추이)
+  const right = values?.slice(4) || []
+  if (right.length >= 6) {
+    const amount = right[3]
+    const pctOrNa = right[4]
+    if (
+      parseNumeric(amount) != null &&
+      !String(amount).includes('%') &&
+      (String(pctOrNa).includes('%') || pctOrNa === 'N/A' || pctOrNa === '—')
+    ) {
+      return 6
+    }
+  }
+  return 5
+}
+
 function paintIntegratedDualBlockTitleRow(ws, rowNum, row, values, fontSize = 12) {
+  const rightCols = integratedDualBlockRightColCount(values)
   ws.mergeCells(rowNum, 1, rowNum, 3)
-  ws.mergeCells(rowNum, 5, rowNum, 9)
+  ws.mergeCells(rowNum, 5, rowNum, 4 + rightCols)
   const leftCell = row.getCell(1)
   leftCell.value = '손익계산 요약'
   leftCell.font = { bold: true, size: fontSize, color: { argb: XL.headerFg } }
@@ -338,8 +363,9 @@ function paintIntegratedDualBlockTitleRow(ws, rowNum, row, values, fontSize = 12
 }
 
 function paintIntegratedDualBlockHeaderRow(row, values, fontSize = 12) {
+  const rightCols = integratedDualBlockRightColCount(values)
   const leftHeaders = values.slice(0, 3)
-  const rightHeaders = values.slice(4, 9)
+  const rightHeaders = values.slice(4, 4 + rightCols)
   leftHeaders.forEach((h, i) => {
     const cell = row.getCell(i + 1)
     cell.value = cellText(h)
@@ -370,8 +396,9 @@ function paintIntegratedDualBlockEmptySide(row, colStart, colCount, fontSize = 1
 }
 
 function paintIntegratedDualBlockDataRow(row, values, fontSize = 12) {
+  const rightCols = integratedDualBlockRightColCount(values)
   const left = values.slice(0, 3)
-  const right = values.slice(4, 9)
+  const right = values.slice(4, 4 + rightCols)
   const hasLeft = /^[①②③④⑤⑥⑦]/.test(cellText(left[0]))
   const hasRight =
     INTEGRATED_DOD_ROW_LABELS.has(cellText(right[0])) ||
@@ -386,7 +413,9 @@ function paintIntegratedDualBlockDataRow(row, values, fontSize = 12) {
   }
 
   if (hasRight) {
-    const pctCols = new Set([3])
+    // 일/주: [구분, 당기, 전기, %(3), 추이] / 월: [구분, 당월, 전월, 증감액(3), %(4), 추이]
+    const pctCols = rightCols >= 6 ? new Set([4]) : new Set([3])
+    const changeAmountCols = rightCols >= 6 ? new Set([3]) : new Set()
     right.forEach((val, ci) => {
       const cell = row.getCell(ci + 5)
       const pct = pctCols.has(ci) || String(val).includes('%')
@@ -400,21 +429,25 @@ function paintIntegratedDualBlockDataRow(row, values, fontSize = 12) {
         cell.numFmt = pct ? NUM_FMT_PCT : NUM_FMT_INT
         cell.font = { size: fontSize, color: { argb: 'FF1E293B' } }
         cell.alignment = { horizontal: 'right', vertical: 'middle' }
-        if (pct && n > 0) cell.font = { size: fontSize, color: { argb: XL.positiveFg } }
-        else if (pct && n < 0) cell.font = { size: fontSize, color: { argb: XL.negativeFg } }
+        if ((pct || changeAmountCols.has(ci)) && n > 0) {
+          cell.font = { size: fontSize, color: { argb: XL.positiveFg } }
+        } else if ((pct || changeAmountCols.has(ci)) && n < 0) {
+          cell.font = { size: fontSize, color: { argb: XL.negativeFg } }
+        } else if (n < 0) {
+          cell.font = { size: fontSize, color: { argb: XL.negativeFg } }
+        }
       } else {
         cell.value = cellText(val) === '' ? null : val
         cell.font = { size: fontSize, color: { argb: 'FF1E293B' } }
-        cell.alignment = { horizontal: ci === 4 ? 'left' : 'right', vertical: 'middle' }
-        if (/추이/.test(cellText(val))) {
-          if (val === '상승') cell.font = { size: fontSize, color: { argb: XL.positiveFg } }
-          else if (val === '하락') cell.font = { size: fontSize, color: { argb: XL.negativeFg } }
-        }
+        const trendCol = rightCols >= 6 ? 5 : 4
+        cell.alignment = { horizontal: ci === trendCol ? 'left' : 'right', vertical: 'middle' }
+        if (val === '상승') cell.font = { size: fontSize, color: { argb: XL.positiveFg } }
+        else if (val === '하락') cell.font = { size: fontSize, color: { argb: XL.negativeFg } }
       }
       cell.border = thinBorder()
     })
   } else {
-    paintIntegratedDualBlockEmptySide(row, 5, 5, fontSize)
+    paintIntegratedDualBlockEmptySide(row, 5, rightCols, fontSize)
   }
 
   row.height = 22
@@ -517,7 +550,7 @@ function isCombinedCommentsSectionRow(row) {
   return /^■ 통합 담당 코멘트/.test(cellText(row[0]))
 }
 
-/** 통합 코멘트 — 일별 소제목 (■ 2026-07-13) */
+/** 통합 코멘트 — 일별 소제목 (■ 2026-07-13 / ■ 날짜 미지정…) */
 function isCombinedCommentsDayHeader(row, inCombinedCommentsSection) {
   if (!inCombinedCommentsSection) return false
   return /^■ (\d{4}-\d{2}-\d{2}|날짜 미지정)/.test(cellText(row[0]))
@@ -1042,7 +1075,14 @@ export function addStyledSheet(workbook, sheetName, rows, opts = {}) {
 
     if (isEmptyRow(values)) {
       closeCombinedCommentsBox(rowNum - 1)
-      inCombinedCommentsSection = false
+      // 일별 코멘트 사이 빈 행에서 섹션을 끊으면 둘째 날부터 day header/본문 스타일이 빠짐
+      const next = sheetRows[ri + 1]
+      const stayInCombinedComments =
+        inCombinedCommentsSection &&
+        next &&
+        !isEmptyRow(next) &&
+        (isCombinedCommentsDayHeader(next, true) || isCombinedCommentsDataRow(next, true))
+      if (!stayInCombinedComments) inCombinedCommentsSection = false
       closeDualGapMerge()
       inTable = false
       tableHeaderLabels = []
@@ -1327,7 +1367,7 @@ export function addStyledSheet(workbook, sheetName, rows, opts = {}) {
           cell.alignment = { horizontal: 'right', vertical: 'middle' }
           cell.font = { size: cellFontSize, color: { argb: 'FF1E293B' } }
           const h = cellText(headerLabel)
-          if (pct && /(?:전일|전주)\s*대비/.test(h)) {
+          if (pct && /(?:전일|전주|전월)\s*대비/.test(h)) {
             if (n > 0) cell.font = { size: cellFontSize, color: { argb: XL.positiveFg } }
             else if (n < 0) cell.font = { size: cellFontSize, color: { argb: XL.negativeFg } }
           } else if (n < 0) {
