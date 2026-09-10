@@ -3,6 +3,7 @@ import {
   getKpiSummary,
   getKpiDaily,
   getKpiByPlatform,
+  getKpiBySegment,
   getKpiCompareYesterday,
 } from '../services/kpiReadService.js'
 import { createTtlCache } from '../utils/ttlCache.js'
@@ -43,7 +44,19 @@ function cachedKpiHandler(endpoint, loader) {
 kpiRouter.get('/summary', cachedKpiHandler('summary', getKpiSummary))
 kpiRouter.get('/daily', cachedKpiHandler('daily', getKpiDaily))
 kpiRouter.get('/by-platform', cachedKpiHandler('by-platform', getKpiByPlatform))
+kpiRouter.get('/by-segment', cachedKpiHandler('by-segment', getKpiBySegment))
 kpiRouter.get(
   '/compare-yesterday',
   cachedKpiHandler('compare-yesterday', getKpiCompareYesterday),
 )
+
+/** 검증 전용 — JS 골든 vs SQL. 운영 캐시 없음. */
+kpiRouter.get('/golden-compare', async (req, res, next) => {
+  try {
+    const { runKpiGoldenCompare } = await import('../services/kpiGoldenCompareService.js')
+    const result = await runKpiGoldenCompare(req.query)
+    res.json(result)
+  } catch (err) {
+    next(err)
+  }
+})

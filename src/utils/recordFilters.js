@@ -3,6 +3,7 @@ import { getSalesMethod } from './salesMethodDetect.js'
 import { resolveRecordPlatform, normalizePlatformLabel } from './platformDetect.js'
 import { isEsserDetailSummaryRecord } from './coupangEsserParser.js'
 import { isEsserSheetTotalRecord } from './esserMetrics.js'
+import { isClosedMallRecord } from '../config/closedMall.js'
 
 /** Firestore에 contextDate만 있는 구 데이터 호환 */
 export function normalizeRecord(row) {
@@ -78,6 +79,12 @@ function resolveKpiCompatYmd(row) {
 
 function getRecordYmdBounds(row) {
   const r = normalizeRecord(row)
+  // 특판: 행 order_date만 — 업로드 period(8/1~8/31)로 일별 필터에 월 전체가 걸리는 것 방지
+  if (isClosedMallRecord(r)) {
+    const ymd = resolveKpiCompatYmd(r)
+    if (!ymd) return null
+    return { from: ymd, to: ymd }
+  }
   if (r.periodFrom && r.periodTo) {
     return { from: r.periodFrom, to: r.periodTo }
   }
@@ -189,7 +196,7 @@ export function matchPeriodFilter(row, { year, month, dayOfWeek }, tab = 'detail
   const r = normalizeRecord(row)
   const bounds = getRecordYmdBounds(r)
 
-  if (bounds && r.periodFrom && r.periodTo) {
+  if (!isClosedMallRecord(r) && bounds && r.periodFrom && r.periodTo) {
     if (dayOfWeek !== '') return true
     if (year) {
       const y = parseInt(year, 10)
@@ -268,7 +275,11 @@ export function applyRecordFilters(list, tab, filters) {
     result = result.filter((r) => matchDateRangeFilter(r, filters.dateFrom, filters.dateTo))
   }
 
-  const hasPeriod = filters.year || filters.month || filters.dayOfWeek !== ''
+  const dayOfWeek =
+    filters.dayOfWeek === '' || filters.dayOfWeek == null
+      ? ''
+      : String(filters.dayOfWeek)
+  const hasPeriod = Boolean(filters.year || filters.month || dayOfWeek !== '')
   if (hasPeriod) {
     result = result.filter((r) =>
       matchPeriodFilter(
@@ -276,7 +287,7 @@ export function applyRecordFilters(list, tab, filters) {
         {
           year: filters.year,
           month: filters.month,
-          dayOfWeek: filters.dayOfWeek,
+          dayOfWeek,
         },
         tab,
       ),

@@ -9,6 +9,7 @@ import { fetchAppSetting, saveAppSetting } from '../services/appSettingsApi.js'
 import {
   getSpecialSaleEntries,
   normalizeSpecialSaleEntry,
+  padMonthKey,
 } from '../utils/specialSaleKpi.js'
 
 const STORAGE_PREFIX = 'essersales_special_sale_v2_'
@@ -38,8 +39,11 @@ function normalizeMonthlyStore(raw) {
     const o = /** @type {Record<string, unknown>} */ (raw)
     if (o.months && typeof o.months === 'object') {
       for (const [mk, bucket] of Object.entries(o.months)) {
-        if (!MONTH_RE.test(mk)) continue
-        months[mk] = getSpecialSaleEntries(bucket).map(normalizeSpecialSaleEntry)
+        const padded = padMonthKey(mk)
+        if (!padded) continue
+        months[padded] = getSpecialSaleEntries(
+          Array.isArray(bucket) ? { entries: bucket } : bucket,
+        ).map(normalizeSpecialSaleEntry)
       }
     } else {
       legacyEntries = getSpecialSaleEntries(raw).map(normalizeSpecialSaleEntry)
@@ -63,27 +67,36 @@ function ensureStore(scope) {
 }
 
 /** 특정 월의 입력행 (없으면 레거시 폴백, 그래도 없으면 빈 배열) */
-function resolveEntriesForMonth(store, monthKey) {
-  if (store.months[monthKey]) return store.months[monthKey]
-  if (store.legacyEntries.length) return store.legacyEntries.map((e) => ({ ...e }))
+function resolveEntriesForMonth(store, monthKey, allowLegacy = true) {
+  const padded = padMonthKey(monthKey)
+  if (padded && store.months[padded]) return store.months[padded]
+  if (monthKey && store.months[monthKey]) return store.months[monthKey]
+  if (padded) {
+    for (const [mk, entries] of Object.entries(store.months)) {
+      if (padMonthKey(mk) === padded) return entries
+    }
+  }
+  if (allowLegacy && store.legacyEntries.length) return store.legacyEntries.map((e) => ({ ...e }))
   return []
 }
 
 /** 월 버킷 확보 (편집용) — 레거시가 있으면 초기값으로 채움 */
 function ensureMonthBucket(store, monthKey) {
-  if (!store.months[monthKey]) {
-    store.months[monthKey] =
+  const mk = padMonthKey(monthKey) || monthKey
+  if (!store.months[mk]) {
+    store.months[mk] =
       store.legacyEntries.length && !Object.keys(store.months).length
         ? store.legacyEntries.map((e) => ({ ...e }))
         : [createEmptySpecialSaleEntry()]
   }
-  return store.months[monthKey]
+  return store.months[mk]
 }
 
 function applyStore(target, normalized) {
   target.months = {}
   for (const [mk, entries] of Object.entries(normalized.months)) {
-    target.months[mk] = entries.map((e) => ({ ...e }))
+    const padded = padMonthKey(mk) || mk
+    target.months[padded] = entries.map((e) => ({ ...e }))
   }
   target.legacyEntries = normalized.legacyEntries.map((e) => ({ ...e }))
 }
@@ -92,12 +105,18 @@ function applyStore(target, normalized) {
 function buildPayload(store) {
   const months = {}
   for (const [mk, entries] of Object.entries(store.months)) {
+    const padded = padMonthKey(mk) || mk
     const clean = (entries || [])
       .map(normalizeSpecialSaleEntry)
       .filter((e) => e.name || e.sales || e.margin)
-    if (clean.length) months[mk] = { entries: clean }
+    if (clean.length) months[padded] = { entries: clean }
   }
   return { months }
+}
+
+/** 엑셀 export 등 — 전체 월 버킷 (당월 스냅샷만 보내면 전월 특판이 지워짐) */
+export function getSpecialSaleSettingPayload(scope) {
+  return buildPayload(ensureStore(scope))
 }
 
 function saveLegacyLocal(key, payload) {
@@ -164,6 +183,19 @@ export async function hydrateSpecialSaleForScope(scope, opts = {}) {
 export async function persistSpecialSale(scope) {
   const key = specialSaleScopeFor(scope)
   const store = ensureStore(scope)
+  try {
+    const existing = await fetchAppSetting(key, SPECIAL_SALE_SETTING_KIND)
+    if (existing?.data) {
+      const incoming = normalizeMonthlyStore(existing.data)
+      for (const [mk, entries] of Object.entries(incoming.months)) {
+        if (!store.months[mk]) {
+          store.months[mk] = entries.map((e) => ({ ...e }))
+        }
+      }
+    }
+  } catch {
+    /* 서버 월 버킷 병합 실패 — 로컬만 저장 */
+  }
   const payload = buildPayload(store)
 
   try {
@@ -182,12 +214,28 @@ export async function persistSpecialSale(scope) {
   }
 }
 
-/** 특정 월의 특판 스냅샷 — 다운스트림(KPI·엑셀)은 { entries } 평면 구조로 소비 */
-export function getSpecialSaleSnapshot(scope, monthKey) {
+/**
+ * 특정 월의 특판 스냅샷 — 다운스트림(KPI·엑셀)은 { entries } 평면 구조로 소비
+ * @param {string} scope
+ * @param {string} monthKey
+ * @param {{ allowLegacy?: boolean }} [opts] allowLegacy=false 이면 해당 월 버킷만 (전월 조회용)
+ */
+export function getSpecialSaleSnapshot(scope, monthKey, opts = {}) {
   const store = ensureStore(scope)
-  const mk = MONTH_RE.test(String(monthKey || '')) ? monthKey : currentMonthKey()
-  const entries = resolveEntriesForMonth(store, mk).map(normalizeSpecialSaleEntry)
+  const mk = padMonthKey(monthKey) || (MONTH_RE.test(String(monthKey || '')) ? monthKey : '')
+  const allowLegacy = opts.allowLegacy !== false
+  if (!mk) {
+    const fallback = currentMonthKey()
+    const entries = resolveEntriesForMonth(store, fallback, allowLegacy).map(normalizeSpecialSaleEntry)
+    return { entries }
+  }
+  const entries = resolveEntriesForMonth(store, mk, allowLegacy).map(normalizeSpecialSaleEntry)
   return { entries }
+}
+
+/** 반응형 스토어 — 대시보드 전월대비 특판 반영 watch용 */
+export function getSpecialSaleReactiveStore(scope) {
+  return ensureStore(scope)
 }
 
 /** 월별 특판 매출 맵 { 'YYYY-MM': [entry,...] } — 전월대비 총매출 계산용 */
@@ -195,9 +243,10 @@ export function getSpecialSaleMonthlyMap(scope, refMonthKey) {
   const store = ensureStore(scope)
   const map = {}
   for (const [mk, entries] of Object.entries(store.months)) {
-    map[mk] = entries.map(normalizeSpecialSaleEntry)
+    const padded = padMonthKey(mk) || mk
+    map[padded] = entries.map(normalizeSpecialSaleEntry)
   }
-  const ref = MONTH_RE.test(String(refMonthKey || '')) ? refMonthKey : ''
+  const ref = padMonthKey(refMonthKey)
   if (ref && !map[ref] && store.legacyEntries.length) {
     map[ref] = store.legacyEntries.map(normalizeSpecialSaleEntry)
   }
@@ -226,7 +275,7 @@ export function useSpecialSale(scope, monthKeyRef) {
 
   const resolveMonth = () => {
     const raw = typeof monthKeyRef === 'function' ? monthKeyRef() : monthKeyRef?.value
-    return MONTH_RE.test(String(raw || '')) ? raw : currentMonthKey()
+    return padMonthKey(raw) || currentMonthKey()
   }
 
   function currentEntries() {

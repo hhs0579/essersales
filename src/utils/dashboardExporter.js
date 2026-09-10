@@ -56,11 +56,10 @@ import {
   kpiSplitSectionTitle,
 } from './platformKpiSplit.js'
 import {
-  isPowerPriceRecord,
   POWER_PRICE_DATA_SOURCE_LABEL,
   POWER_PRICE_HIDDEN_KPI_KEYS,
 } from '../config/powerPrice.js'
-import { resolveCombinedBrandRollupLabel } from './recordSourceLabel.js'
+import { matchesCombinedReportBrand, isEsserReportBrandChannel } from './recordSourceLabel.js'
 import { OTHER_SELLERS_BRAND_LABEL } from '../config/closedMall.js'
 import {
   buildProfitLossReportSheets,
@@ -72,11 +71,27 @@ import {
   computeDayOverDaySales,
   computeCombinedBrandDayOverDaySales,
   computeCombinedSegmentDayOverDaySales,
+  buildCombinedBrandMonthOverMonthFromSegmentRows,
+  brandPrevSalesMapFromLookupRecords,
   buildDayOverDayExcelRows,
   resolveReferenceDateKey,
+  resolveSalesComparisonMode,
 } from './dayOverDaySales.js'
+import { getSpecialSaleDisplayLabels } from './specialSaleKpi.js'
 
 const REPORT_TITLE = '플랫폼 일별 매출 리포트'
+
+/** 세그먼트 행·수기 특판에서 전월대비 특판 라벨 수집 */
+function collectSpecialSaleLabelsFromRows(segmentRows, specialSale) {
+  const labels = new Set(getSpecialSaleDisplayLabels(specialSale))
+  for (const row of segmentRows || []) {
+    if (row?.kind === 'special_sale' || row?.segmentKey === 'special_sale') {
+      const label = String(row?.label || '').trim()
+      if (label) labels.add(label)
+    }
+  }
+  return [...labels]
+}
 
 /** 통합 엑셀 — 브랜드별 요약리포트 시트 */
 const COMBINED_BRAND_SUMMARY_REPORTS = [
@@ -86,9 +101,9 @@ const COMBINED_BRAND_SUMMARY_REPORTS = [
     reportTitle: '베스트하임 일별 매출 리포트',
   },
   {
-    sourceLabel: '사본느리',
-    sheetName: '사본느리 요약리포트',
-    reportTitle: '사본느리 일별 매출 리포트',
+    sourceLabel: '에쎄르',
+    sheetName: '에쎄르 요약리포트',
+    reportTitle: '에쎄르 일별 매출 리포트',
   },
   {
     sourceLabel: POWER_PRICE_DATA_SOURCE_LABEL,
@@ -105,12 +120,12 @@ const COMBINED_BRAND_SUMMARY_REPORTS = [
 ]
 
 function filterRecordsBySourceLabel(records, sourceLabel) {
-  return (records || []).filter((r) => resolveCombinedBrandRollupLabel(r) === sourceLabel)
+  return (records || []).filter((r) => matchesCombinedReportBrand(r, sourceLabel))
 }
 
 function hasCombinedSourceLabels(records) {
   return COMBINED_BRAND_SUMMARY_REPORTS.some((b) =>
-    (records || []).some((r) => resolveCombinedBrandRollupLabel(r) === b.sourceLabel),
+    (records || []).some((r) => matchesCombinedReportBrand(r, b.sourceLabel)),
   )
 }
 
@@ -130,7 +145,11 @@ function buildCombinedBrandSummarySheets({
     const brandReturns = filterRecordsBySourceLabel(returnRecords, brand.sourceLabel)
     if (!brandSale.length && !brandReturns.length) continue
 
-    const brandManualGroup = channelGroups.filter((g) => g.label === brand.sourceLabel)
+    const brandManualGroup = channelGroups.filter(
+      (g) =>
+        g.label === brand.sourceLabel ||
+        (brand.sourceLabel === '에쎄르' && isEsserReportBrandChannel(g.label)),
+    )
     const brandManualEntries = brandManualGroup.flatMap((g) => g.entries || [])
 
     const brandDodRef = filterRecordsBySourceLabel(dodRefProductRecords, brand.sourceLabel)
@@ -1147,10 +1166,15 @@ export function buildDashboardWorkbook({
   manualAdEntries = [],
   specialSale = null,
   specialSaleByMonth = null,
+  manualExpense = null,
   combinedComments = null,
   hiddenKpiKeys = [],
   isCombined = false,
   profitLossTemplate = null,
+  summarySheetOnly = false,
+  /** 통합 월별 전월대비 — 화면과 동일 세그먼트 SoT */
+  serverPlatformKpiRows = [],
+  serverPrevMonthPlatformKpiRows = [],
 }) {
   if (!records?.length) {
     throw new Error('다운로드할 데이터가 없습니다.')
@@ -1170,6 +1194,8 @@ export function buildDashboardWorkbook({
     month: filters.month || '',
     period: filters.period || 'daily',
     specialSale: isCombined ? specialSale : null,
+    specialSaleByMonth: isCombined ? specialSaleByMonth : null,
+    manualExpense: isCombined ? manualExpense : null,
   }
   const channelGroups =
     manualAdByChannel.length > 0
@@ -1191,83 +1217,125 @@ export function buildDashboardWorkbook({
   const isPowerPriceExport = channelLabel === '파워프라이스'
   const isCombinedExport = isCombined || channelLabel === '통합'
 
-  const dayOverDayComputed = isCombinedExport
-    ? computeCombinedBrandDayOverDaySales(dodRefProductRecords, {
-        manualFilterCtx,
-        lookupRows: dodLookupProductRecords,
-        referenceDateKey:
-          resolveReferenceDateKey(dodRefProductRecords, manualFilterCtx) || undefined,
-        specialSaleByMonth: specialSaleByMonth || null,
-      })
-    : computeDayOverDaySales(dodRefProductRecords, {
-        manualAdEntries: allManualAdEntries,
-        manualFilterCtx,
-        lookupRows: dodLookupProductRecords,
-        referenceDateKey:
-          resolveReferenceDateKey(dodRefProductRecords, manualFilterCtx) || undefined,
-        specialSaleByMonth: specialSaleByMonth || null,
-      })
-  const dayOverDayAoa = buildDayOverDayExcelRows(
-    dayOverDayComputed,
-    '',
-    isCombinedExport
-      ? {
-          sectionTitle:
-            dayOverDayComputed[0]?.comparisonMode === 'month'
-              ? '■ 전월 대비 매출 (베스트하임 · 사본느리 · 파워프라이스 · 합계)'
-              : dayOverDayComputed[0]?.comparisonMode === 'week'
-                ? '■ 전주 대비 매출 (베스트하임 · 사본느리 · 파워프라이스 · 합계)'
-                : '■ 전일 대비 매출 (베스트하임 · 사본느리 · 파워프라이스 · 합계)',
-          comparisonMode: dayOverDayComputed[0]?.comparisonMode,
-        }
-      : { comparisonMode: dayOverDayComputed[0]?.comparisonMode },
-  )
+  // 통합 SoT = 세그먼트 KPI 합계 (특판·PP 유무와 무관하게 동일) — 전월대비보다 먼저 계산
+  const combinedSplitRows =
+    isCombinedExport && !isPowerPriceExport
+      ? buildKpiSplitRowsForChannel('통합', saleRecords, channelGroups, manualFilterCtx)
+      : null
 
-  const hasPowerPriceInCombined =
-    isCombinedExport && productSaleRecords.some((r) => isPowerPriceRecord(r))
+  const comparisonMode = resolveSalesComparisonMode(manualFilterCtx)
+  // 엑셀 내 매출·수익(combinedSplitRows)과 동일 SoT — 서버 세그먼트는 화면용, export는 시트 일치 우선
+  const segmentMomRows =
+    combinedSplitRows ||
+    (serverPlatformKpiRows?.length ? serverPlatformKpiRows : null)
+  const prevMomRows =
+    serverPrevMonthPlatformKpiRows?.length
+      ? serverPrevMonthPlatformKpiRows
+      : []
+  const prevBrandSalesFallback =
+    isCombinedExport && comparisonMode === 'month' && dodLookupProductRecords.length
+      ? brandPrevSalesMapFromLookupRecords(dodLookupProductRecords, {
+          manualFilterCtx,
+          specialSaleByMonth: specialSaleByMonth || null,
+        })
+      : null
+  const dayOverDayComputed =
+    isCombinedExport && comparisonMode === 'month' && segmentMomRows?.length
+      ? buildCombinedBrandMonthOverMonthFromSegmentRows(segmentMomRows, prevMomRows, {
+          manualFilterCtx: {
+            ...manualFilterCtx,
+            specialSale: isCombinedExport ? specialSale : null,
+          },
+          specialSaleByMonth: specialSaleByMonth || null,
+          specialSaleLabels: collectSpecialSaleLabelsFromRows(segmentMomRows, specialSale),
+          prevBrandSalesFallback,
+        })
+      : isCombinedExport
+        ? computeCombinedBrandDayOverDaySales(dodRefProductRecords, {
+            manualFilterCtx,
+            lookupRows: dodLookupProductRecords,
+            referenceDateKey:
+              resolveReferenceDateKey(dodRefProductRecords, manualFilterCtx) || undefined,
+            specialSaleByMonth: specialSaleByMonth || null,
+          })
+        : computeDayOverDaySales(dodRefProductRecords, {
+            manualAdEntries: allManualAdEntries,
+            manualFilterCtx,
+            lookupRows: dodLookupProductRecords,
+            referenceDateKey:
+              resolveReferenceDateKey(dodRefProductRecords, manualFilterCtx) || undefined,
+            specialSaleByMonth: specialSaleByMonth || null,
+          })
+  const dayOverDayAoa = summarySheetOnly
+    ? []
+    : buildDayOverDayExcelRows(
+        dayOverDayComputed,
+        '',
+        isCombinedExport
+          ? {
+              sectionTitle:
+                dayOverDayComputed[0]?.comparisonMode === 'month'
+                  ? '■ 전월 대비 매출 (베스트하임 · 에쎄르 · 파워프라이스 · 기타 판매처 · 특판 · 합계)'
+                  : dayOverDayComputed[0]?.comparisonMode === 'week'
+                    ? '■ 전주 대비 매출 (베스트하임 · 에쎄르 · 파워프라이스 · 기타 판매처 · 특판 · 합계)'
+                    : '■ 전일 대비 매출 (베스트하임 · 에쎄르 · 파워프라이스 · 기타 판매처 · 특판 · 합계)',
+              comparisonMode: dayOverDayComputed[0]?.comparisonMode,
+            }
+          : { comparisonMode: dayOverDayComputed[0]?.comparisonMode },
+      )
+
   const kpiSaleRecords = isPowerPriceExport ? productSaleRecords : saleRecords
+  const combinedSegmentTotal = combinedSplitRows?.find((r) => r.label === '합계')
   const totalKpi = isPowerPriceExport
     ? summarizePowerPriceKpis(kpiSaleRecords, allManualAdEntries, manualFilterCtx)
-    : hasPowerPriceInCombined
-      ? summarizeCombinedKpis(kpiSaleRecords, channelGroups, manualFilterCtx)
-      : summarizeEsserKpisWithManual(saleRecords, allManualAdEntries, manualFilterCtx)
+    : combinedSegmentTotal
+      ? finalizeEsserBucket({
+          sales: combinedSegmentTotal.profit?.sales ?? 0,
+          salesQty: combinedSegmentTotal.profit?.salesQty ?? 0,
+          totalCost: combinedSegmentTotal.profit?.totalCost ?? 0,
+          netProfit: combinedSegmentTotal.profit?.netProfit ?? 0,
+          adSpend: combinedSegmentTotal.ad?.adSpend ?? 0,
+          adSales: combinedSegmentTotal.ad?.adSales ?? 0,
+        })
+      : isCombinedExport
+        ? summarizeCombinedKpis(kpiSaleRecords, channelGroups, manualFilterCtx)
+        : summarizeEsserKpisWithManual(saleRecords, allManualAdEntries, manualFilterCtx)
   const returnKpi = summarizeReturnKpis(returnRecords)
   const costKpiAll = summarizeKpis(kpiSaleRecords)
   const integratedCostKpi =
     isCombinedExport && !isPowerPriceExport
-      ? {
-          totalCost:
-            buildKpiSplitRowsForChannel(
-              '통합',
-              saleRecords,
-              channelGroups,
-              manualFilterCtx,
-            ).find((r) => r.label === '합계')?.profit?.totalCost ?? costKpiAll.totalCost,
-        }
+      ? { totalCost: totalKpi.totalCost ?? costKpiAll.totalCost }
       : costKpiAll
-  const daily = isPowerPriceExport
-    ? aggregateEsserByDayWithManualSpendOnly(kpiSaleRecords, allManualAdEntries, manualFilterCtx)
-    : hasPowerPriceInCombined
-      ? aggregateCombinedByDayWithManual(kpiSaleRecords, channelGroups, manualFilterCtx)
-      : aggregateEsserByDayWithManual(saleRecords, allManualAdEntries, manualFilterCtx)
-  const weekly = aggregateEsserByWeekWithManual(
-    kpiSaleRecords,
-    allManualAdEntries,
-    manualFilterCtx,
-    filterYear,
-    isPowerPriceExport,
-  )
-  const monthly = aggregateEsserByMonthWithManual(
-    kpiSaleRecords,
-    allManualAdEntries,
-    manualFilterCtx,
-    filterYear,
-    isPowerPriceExport,
-  )
+
+  /** 월별 export — ③~⑫·KPI 시트 생략 (NAS 메모리) */
+  let daily
+  let weekly
+  let monthly
+  if (!summarySheetOnly) {
+    daily = isPowerPriceExport
+      ? aggregateEsserByDayWithManualSpendOnly(kpiSaleRecords, allManualAdEntries, manualFilterCtx)
+      : isCombinedExport
+        ? aggregateCombinedByDayWithManual(kpiSaleRecords, channelGroups, manualFilterCtx)
+        : aggregateEsserByDayWithManual(saleRecords, allManualAdEntries, manualFilterCtx)
+    weekly = aggregateEsserByWeekWithManual(
+      kpiSaleRecords,
+      allManualAdEntries,
+      manualFilterCtx,
+      filterYear,
+      isPowerPriceExport,
+    )
+    monthly = aggregateEsserByMonthWithManual(
+      kpiSaleRecords,
+      allManualAdEntries,
+      manualFilterCtx,
+      filterYear,
+      isPowerPriceExport,
+    )
+  }
 
   const wb = createBrandedWorkbook()
 
-  const profitLossTpl = profitLossTemplate ?? null
+  const profitLossTpl = summarySheetOnly ? null : (profitLossTemplate ?? null)
   if (profitLossTpl) {
     try {
       const plSheets = buildProfitLossReportSheets(profitLossTpl, {
@@ -1301,6 +1369,7 @@ export function buildDashboardWorkbook({
         costKpi: integratedCostKpi,
         dayOverDayComputed,
         combinedComments,
+        splitRows: combinedSplitRows,
       })
     : buildSummaryReportSheet({
         kpi: totalKpi,
@@ -1329,6 +1398,17 @@ export function buildDashboardWorkbook({
     exactColWidths: isCombinedExport,
     minColWidth: isCombinedExport ? 6 : 10,
   })
+
+  if (summarySheetOnly) {
+    const fileName = buildChannelExportFileName(channelLabel, filters, records)
+    return {
+      wb,
+      fileName,
+      sheetCount: wb.worksheets.length,
+      rowCount: records.length,
+      integratedSummary: isCombinedExport,
+    }
+  }
 
   if (channelLabel === '통합' && hasCombinedSourceLabels(list)) {
     const brandSheets = buildCombinedBrandSummarySheets({
@@ -1362,13 +1442,16 @@ export function buildDashboardWorkbook({
     },
   )
 
-  const salesMethodRows = isPowerPriceExport
-    ? buildPowerPriceSalesMethodSheet(kpiSaleRecords)
-    : buildSalesMethodSheet(saleRecords)
-  addStyledSheet(wb, '②판매방식별', salesMethodRows, {
-    freezeHeader: true,
-    colWidths: colWidthsFromHeaders(salesMethodRows[0] || []),
-  })
+  // 통합 엑셀: 판매방식별 시트 제외 (①요약리포트·세그먼트·스토어 SoT 통일)
+  if (!isCombinedExport) {
+    const salesMethodRows = isPowerPriceExport
+      ? buildPowerPriceSalesMethodSheet(kpiSaleRecords)
+      : buildSalesMethodSheet(saleRecords)
+    addStyledSheet(wb, '②판매방식별', salesMethodRows, {
+      freezeHeader: true,
+      colWidths: colWidthsFromHeaders(salesMethodRows[0] || []),
+    })
+  }
 
   addStyledSheet(wb, '③일별', buildPeriod(daily, totalKpi, '일별 매출 추이', costKpiAll), {
     freezeHeader: true,
@@ -1476,8 +1559,11 @@ export async function downloadDashboardExcel(options) {
   }
 }
 
-/** 현재 데이터 탭(표)만 단일 시트 */
-export async function downloadTableExcel({
+/**
+ * 현재 데이터 탭(표)과 동일한 단일 시트 워크북 (서버 export 공용)
+ * 행·컬럼·값·서식은 downloadTableExcel 과 동일해야 함.
+ */
+export function buildTableWorkbook({
   rows,
   columns,
   sheetName = '데이터',
@@ -1485,16 +1571,29 @@ export async function downloadTableExcel({
   filters = {},
 }) {
   if (!rows?.length) throw new Error('다운로드할 데이터가 없습니다.')
+  const tMap = performance.now()
   const header = columns.map((c) => c.label)
   const body = rows.map((row) => {
     const norm = normalizeEsserDetailFields(row)
     return columns.map((c) => exportCellValue(norm, c.key))
   })
+  const mapMs = Math.round(performance.now() - tMap)
+  const tSheet = performance.now()
   const wb = createBrandedWorkbook()
   addStyledSheet(wb, sheetName.slice(0, 31), [header, ...body], {
     freezeHeader: true,
     colWidths: colWidthsFromHeaders(header),
   })
   const fileName = buildChannelExportFileName(channelLabel, filters, rows)
+  buildTableWorkbook.lastTimings = {
+    cellMap: mapMs,
+    addStyledSheet: Math.round(performance.now() - tSheet),
+  }
+  return { wb, fileName, rowCount: rows.length, sheetCount: 1 }
+}
+
+/** 현재 데이터 탭(표)만 단일 시트 */
+export async function downloadTableExcel(options) {
+  const { wb, fileName } = buildTableWorkbook(options)
   await downloadExcelWorkbook(wb, fileName)
 }

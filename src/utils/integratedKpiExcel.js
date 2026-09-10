@@ -7,8 +7,10 @@ import {
   isExternalAdKpiNA,
   isPowerPriceKpiNA,
   isSpecialSaleKpiNA,
+  isManualExpenseKpiNA,
 } from './platformKpiSplit.js'
 import { isSpecialSaleRowLabel } from './specialSaleKpi.js'
+import { isManualExpenseRowLabel, isManualExpenseSegmentKind } from './manualExpenseKpi.js'
 import { isManualAdKpiLabel } from '../config/manualAdSpend.js'
 
 const KPI_PERCENT_KEYS = new Set([
@@ -26,10 +28,11 @@ function formatExcelKpiNumber(key, value) {
   return Math.round(n)
 }
 
-function segmentKpiRaw(rowLabel, section, key, value, specialSale = null) {
+function segmentKpiRaw(rowLabel, section, key, value, specialSale = null, manualExpense = null, row = null) {
   if (isExternalAdKpiNA(rowLabel, section, key)) return null
   if (isPowerPriceKpiNA(rowLabel, section, key)) return null
   if (isSpecialSaleKpiNA(rowLabel, section, key, specialSale)) return null
+  if (isManualExpenseKpiNA(rowLabel, section, key, manualExpense, row)) return null
   return value ?? 0
 }
 
@@ -49,6 +52,7 @@ export function integratedSegmentKpiCell(key, value) {
  * @param {object[]} channelGroups
  * @param {object} manualFilterCtx
  * @param {string[]} [hiddenKpiKeys]
+ * @param {object[]|null} [splitRowsInput] 동일 SoT용 미리 계산된 세그먼트 행
  * @returns {string[][]}
  */
 export function buildIntegratedSegmentKpiExcelRows(
@@ -56,13 +60,16 @@ export function buildIntegratedSegmentKpiExcelRows(
   channelGroups,
   manualFilterCtx,
   hiddenKpiKeys = COMBINED_HIDDEN_KPI_KEYS,
+  splitRowsInput = null,
 ) {
-  const splitRows = buildKpiSplitRowsForChannel(
-    '통합',
-    saleRecords,
-    channelGroups,
-    manualFilterCtx,
-  )
+  const splitRows =
+    splitRowsInput ||
+    buildKpiSplitRowsForChannel(
+      '통합',
+      saleRecords,
+      channelGroups,
+      manualFilterCtx,
+    )
   const rows = []
 
   const profitCards = filterKpiCards(ESSER_PROFIT_KPI_CARDS, hiddenKpiKeys)
@@ -74,10 +81,21 @@ export function buildIntegratedSegmentKpiExcelRows(
       ...profitCards.map((c) =>
         integratedSegmentKpiCell(
           c.key,
-          segmentKpiRaw(row.label, 'profit', c.key, row.profit[c.key], manualFilterCtx?.specialSale),
+          segmentKpiRaw(
+            row.label,
+            'profit',
+            c.key,
+            row.profit[c.key],
+            manualFilterCtx?.specialSale,
+            manualFilterCtx?.manualExpense,
+            row,
+          ),
         ),
       ),
-      isManualAdKpiLabel(row.label) || isSpecialSaleRowLabel(row.label, manualFilterCtx?.specialSale)
+      isManualAdKpiLabel(row.label) ||
+      isSpecialSaleRowLabel(row.label, manualFilterCtx?.specialSale) ||
+      isManualExpenseSegmentKind(row) ||
+      isManualExpenseRowLabel(row.label, manualFilterCtx?.manualExpense)
         ? ''
         : row.rowCount ?? '',
     ])
@@ -95,7 +113,15 @@ export function buildIntegratedSegmentKpiExcelRows(
       ...adCards.map((c) =>
         integratedSegmentKpiCell(
           c.key,
-          segmentKpiRaw(row.label, 'ad', c.key, row.ad[c.key], manualFilterCtx?.specialSale),
+          segmentKpiRaw(
+            row.label,
+            'ad',
+            c.key,
+            row.ad[c.key],
+            manualFilterCtx?.specialSale,
+            manualFilterCtx?.manualExpense,
+            row,
+          ),
         ),
       ),
     ])

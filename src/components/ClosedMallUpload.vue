@@ -30,6 +30,8 @@ const success = ref('')
 const progressMessage = ref('')
 const preview = ref(null)
 const pendingFile = ref(null)
+// 3단계: 미리보기 표가 브라우저 파싱에 의존하므로 Worker/서버단독 전환 대상이 아님.
+// 후속: POST /api/v1/uploads/excel/preview → 서버 parseExcelUpload(저장 없음) → 동일 파서로 저장.
 
 const summary = computed(() => preview.value?.summary || null)
 const previewRows = computed(() => preview.value?.previewRows || [])
@@ -185,9 +187,11 @@ async function confirmUpload() {
       · 선택:
       <code>a옵션</code>
       <code>a브랜드</code>
-      · a판매처 = 특판 판매처명 (대시보드에 「{{ brandDef.dataSourceLabel }}(판매처)」로 표시) · a수수료는
-      금액(<code>12500</code>) 또는 비율(<code>25%</code>·엑셀 퍼센트 셀) · a원가는 개당 원가
-      (마진 = 결제가 − 배송비 − 수수료 − 원가×수량)
+      · a판매처 = 특판 판매처명 (대시보드에 「{{ brandDef.dataSourceLabel }}(판매처)」로 표시)       · a수수료는
+      금액(<code>12500</code>) 또는 비율(<code>25%</code>·엑셀 퍼센트 셀)
+      · <code>정산가</code>·<code>마진</code>(<code>a마진</code>) 열이 있으면 엑셀 마진 공식 사용
+      (정산가 − 배송비 − a원가, a원가 = 행 합계 원가)
+      · 없으면 a원가 = 개당 원가 (마진 = 결제가 − 배송비 − 수수료 − 원가×수량)
     </p>
 
     <ExcelUpload

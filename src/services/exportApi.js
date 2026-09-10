@@ -38,6 +38,14 @@ export async function pgDownloadIntegratedExport(params = {}, settingsOverrides 
 
 
 
+  const timeoutMs = Number(import.meta.env.VITE_EXPORT_TIMEOUT_MS || 300_000)
+
+  const controller = new AbortController()
+
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+
+
   let res
 
   try {
@@ -50,11 +58,23 @@ export async function pgDownloadIntegratedExport(params = {}, settingsOverrides 
 
       body: usePost ? JSON.stringify(settingsOverrides) : undefined,
 
+      signal: controller.signal,
+
     })
 
-  } catch {
+  } catch (err) {
+
+    if (err?.name === 'AbortError') {
+
+      throw new Error(`엑셀 생성 시간이 초과되었습니다 (${Math.round(timeoutMs / 1000)}초). 잠시 후 다시 시도해 주세요.`)
+
+    }
 
     throw new Error('PostgreSQL export API에 연결할 수 없습니다.')
+
+  } finally {
+
+    clearTimeout(timeoutId)
 
   }
 

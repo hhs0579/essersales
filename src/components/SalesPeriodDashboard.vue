@@ -40,6 +40,7 @@ import {
   isPowerPriceKpiNA,
   isCoupang1pRocketKpiNA,
   isSpecialSaleKpiNA,
+  isManualExpenseKpiNA,
 } from '../utils/platformKpiSplit.js'
 import { isManualAdKpiLabel } from '../config/manualAdSpend.js'
 
@@ -51,7 +52,7 @@ import {
 } from '../constants/salesMethods.js'
 
 import { normalizePlatformLabel } from '../utils/platformDetect.js'
-import { computeDayOverDaySales, computeCombinedBrandDayOverDaySales, resolveSalesComparisonMode, salesComparisonSectionTitle, salesComparisonCurrentColumnLabel, salesComparisonPrevColumnLabel, salesComparisonChangeColumnLabel } from '../utils/dayOverDaySales.js'
+import { computeDayOverDaySales, computeCombinedBrandDayOverDaySales, buildCombinedBrandMonthOverMonthFromSegmentRows, brandPrevSalesMapFromLookupRecords, resolveSalesComparisonMode, salesComparisonSectionTitle, salesComparisonCurrentColumnLabel, salesComparisonPrevColumnLabel, salesComparisonChangeColumnLabel, specialSaleMonthlyTotalsSize } from '../utils/dayOverDaySales.js'
 import { filterKpiCards } from '../config/combinedChannel.js'
 import { isServerKpiOnly } from '../services/kpiSource.js'
 
@@ -86,10 +87,16 @@ const props = defineProps({
   serverKpiBucket: { type: Object, default: null },
   /** Phase 2-2 — server platform split rows */
   serverPlatformKpiRows: { type: Array, default: () => [] },
+  /** 통합 월별 전월대비 — 전월 by-segment */
+  serverPrevMonthPlatformKpiRows: { type: Array, default: () => [] },
   /** Phase 2-2 — server day-over-day rows */
   serverDayOverDayRows: { type: Array, default: () => [] },
   /** 통합 — 브랜드 세그먼트(베스트하임·사본느리 등) detail 로딩 중 */
   segmentsLoading: { type: Boolean, default: false },
+  /** 서버 KPI fetch 중 */
+  kpiLoading: { type: Boolean, default: false },
+  /** KPI API 실패 메시지 */
+  kpiError: { type: String, default: '' },
 })
 
 
@@ -151,15 +158,14 @@ const platformKpiRows = computed(() => {
   // 직접입력 스코프는 클라 집계 우선 (서버 by-platform과 행 구조가 다름)
   if (props.powerPriceKpi || props.coupang1pKpi) {
     /* fall through to builders below */
-  } else if (props.serverPlatformKpiRows?.length && !props.combinedKpi) {
-    // 플랫폼·기타: 서버 행 고정
+  } else if (props.serverPlatformKpiRows?.length) {
+    // 플랫폼·기타·통합(by-segment): 서버 행 고정
     return props.serverPlatformKpiRows
   }
   if (!showPlatformSplit.value && !props.powerPriceKpi && !props.coupang1pKpi) return []
   const channelGroups = props.manualAdByChannel.length
     ? props.manualAdByChannel
     : [{ label: '베스트하임', entries: props.manualAdEntries }]
-  const hasClientRecords = (props.records?.length || 0) > 0 || kpiSourceRecords.value.length > 0
   let rows = []
   if (props.powerPriceKpi) {
     rows = buildPowerPriceKpiSplitRows(
@@ -170,22 +176,13 @@ const platformKpiRows = computed(() => {
   } else if (props.coupang1pKpi) {
     rows = buildCoupang1pRocketKpiSplitRows(kpiSourceRecords.value)
   } else if (props.combinedKpi) {
-    // 통합 표 = 브랜드 세그먼트(클라). detail/날짜 재집계 중엔 서버 플랫폼 행만 (메인스레드 렉 방지)
-    if (props.segmentsLoading || !hasClientRecords) {
-      rows = props.serverPlatformKpiRows || []
-      if (props.serverKpiBucket && rows.length) {
-        rows = patchCombinedTotalFromServer(rows, props.serverKpiBucket)
-      }
-    } else {
-      // 합계는 세그먼트 합산 유지.
-      // 서버 KPI로 합계만 덮으면(광고 이중계상·범위 불일치) 행 합 ≠ 합계로 보임.
-      rows = buildCombinedKpiSplitRows(
-        props.records,
-        kpiSourceRecords.value,
-        channelGroups,
-        props.manualFilterCtx,
-      )
-    }
+    // 서버 by-segment 미응답 시 레거시 폴백
+    rows = buildCombinedKpiSplitRows(
+      props.records,
+      kpiSourceRecords.value,
+      channelGroups,
+      props.manualFilterCtx,
+    )
   } else if (props.otherSellersKpi) {
     rows = buildOtherSellersKpiSplitRows(kpiSourceRecords.value)
     if (props.serverKpiBucket) {
@@ -206,19 +203,38 @@ const platformKpiAdRows = computed(() =>
   props.combinedKpi ? filterKpiRowsWithAdSpend(platformKpiRows.value) : platformKpiRows.value,
 )
 
+const kpiSplitCompact = computed(() =>
+  props.combinedKpi ||
+  (props.serverPlatformKpiRows || []).some((r) => String(r.label || '').startsWith('베스트하임(')),
+)
+
 const kpiProfitSectionTitle = computed(() =>
-  kpiSplitSectionTitle(platformKpiRows.value, 'profit', { compact: props.combinedKpi }),
+  kpiSplitSectionTitle(platformKpiRows.value, 'profit', { compact: kpiSplitCompact.value }),
 )
 
 const kpiAdSectionTitle = computed(() =>
-  kpiSplitSectionTitle(platformKpiAdRows.value, 'ad', { compact: props.combinedKpi }),
+  kpiSplitSectionTitle(platformKpiAdRows.value, 'ad', { compact: kpiSplitCompact.value }),
 )
 
 const kpiSummary = computed(() => {
-  // 통합 브랜드 세그먼트가 준비되면 표 합계 = 상단 KPI (서버 합계와 섞지 않음)
-  if (props.combinedKpi && !props.segmentsLoading && platformKpiRows.value.length) {
+  // 통합: 서버 세그먼트 합계 행 = 상단 KPI (summary와 섞지 않음)
+  if (props.combinedKpi && platformKpiRows.value.length) {
     const total = platformKpiRows.value.find((r) => r.label === '합계')
-    if (total) return { ...total.ad, ...total.profit }
+    if (total) {
+      // profit 스프레드가 adSpend를 덮어쓰지 않도록 광고 필드는 ad 우선
+      return {
+        ...total.profit,
+        ...total.ad,
+        totalCost: total.profit?.totalCost ?? total.ad?.totalCost ?? 0,
+        netProfit: total.profit?.netProfit ?? total.ad?.netProfit ?? 0,
+        adSpend: total.ad?.adSpend ?? 0,
+        adSales: total.ad?.adSales ?? 0,
+        roas: total.ad?.roas ?? 0,
+        salesRoas: total.ad?.salesRoas ?? 0,
+        organicSales: total.ad?.organicSales ?? 0,
+        organicSalesRate: total.ad?.organicSalesRate ?? 0,
+      }
+    }
   }
   // 그 외 스코프: 화면 상단 KPI는 서버 단일 소스
   if (props.serverKpiBucket && isServerKpiOnly()) return props.serverKpiBucket
@@ -275,18 +291,61 @@ const dayOverDayLookupRecords = computed(() =>
 
 const dayOverDayRows = computed(() => {
   if (props.hideDayOverDay) return []
-  // Phase 2: 서버 전일대비가 있으면 통합 포함 우선 (detail 대기/덮어쓰기 방지)
+  const mode = resolveSalesComparisonMode(props.manualFilterCtx)
+  const combinedMonth = props.combinedKpi && mode === 'month'
+  const specialSaleByMonth = props.manualFilterCtx?.specialSaleByMonth || null
+  const lookup = dayOverDayLookupRecords.value
+  const hasClientRows = Boolean(lookup.length || props.records.length)
+
+  // 통합 월별 전월대비 — 서버 세그먼트 합계와 동일 SoT (클라 records보다 우선)
+  if (combinedMonth) {
+    if (props.serverPlatformKpiRows?.length) {
+      const prevFallback =
+        lookup.length || props.records.length
+          ? brandPrevSalesMapFromLookupRecords(lookup.length ? lookup : props.records, {
+              manualFilterCtx: props.manualFilterCtx,
+              specialSaleByMonth,
+            })
+          : null
+      return buildCombinedBrandMonthOverMonthFromSegmentRows(
+        props.serverPlatformKpiRows,
+        props.serverPrevMonthPlatformKpiRows || [],
+        {
+          manualFilterCtx: props.manualFilterCtx,
+          specialSaleByMonth,
+          specialSaleLabels: props.manualFilterCtx?.specialSaleRowLabels || [],
+          prevBrandSalesFallback: prevFallback,
+        },
+      )
+    }
+    if (hasClientRows) {
+      return computeCombinedBrandDayOverDaySales(props.records, {
+        manualAdEntries: props.manualAdEntries,
+        manualFilterCtx: props.manualFilterCtx,
+        lookupRows: lookup.length ? lookup : props.records,
+        specialSaleByMonth,
+      })
+    }
+    if (specialSaleMonthlyTotalsSize(specialSaleByMonth)) {
+      return computeCombinedBrandDayOverDaySales([], {
+        manualFilterCtx: props.manualFilterCtx,
+        specialSaleByMonth,
+      })
+    }
+    return []
+  }
+
+  // Phase 2: 서버 전일대비가 있으면 통합(일·주) 포함 우선
   if (props.serverDayOverDayRows?.length && (isServerKpiOnly() || !props.combinedKpi)) {
     return props.serverDayOverDayRows
   }
-  const lookup = dayOverDayLookupRecords.value
   if (!lookup.length && !props.records.length) return []
   const compute = props.combinedKpi ? computeCombinedBrandDayOverDaySales : computeDayOverDaySales
   return compute(props.records, {
     manualAdEntries: props.manualAdEntries,
     manualFilterCtx: props.manualFilterCtx,
     lookupRows: lookup.length ? lookup : props.records,
-    specialSaleByMonth: props.manualFilterCtx?.specialSaleByMonth || null,
+    specialSaleByMonth,
   })
 })
 
@@ -315,8 +374,9 @@ const dayOverDayCaption = computed(() => {
   if (!first) return ''
   if (salesComparisonMode.value === 'month') {
   const ssNote =
-    props.manualFilterCtx?.specialSaleByMonth?.size
-      ? ' · 합계 행에 해당 월 특판 매출 포함'
+    props.manualFilterCtx?.specialSaleByMonth &&
+    specialSaleMonthlyTotalsSize(props.manualFilterCtx.specialSaleByMonth)
+      ? ' · 특판 행 = 해당 월 수기 특판 총합 (합계에 포함)'
       : ''
     return `기준월 ${first.refMonth || first.referenceDate || '—'} · 전월 ${first.prevMonth || first.prevDate || '—'} (일별 매출 월 합산${ssNote})`
   }
@@ -391,8 +451,8 @@ const filterSummary = computed(() => {
         ? COUPANG_1P_ROCKET_KPI_SPLIT_LABELS
         : props.combinedKpi
           ? COMBINED_KPI_SPLIT_LABELS
-          : PLATFORM_KPI_SPLIT_LABELS
-    parts.push(`KPI: ${labels.join('·')}`)
+          : (props.serverPlatformKpiRows || []).map((r) => r.label).filter(Boolean)
+    parts.push(`KPI: ${(labels.length ? labels : PLATFORM_KPI_SPLIT_LABELS).join('·')}`)
   }
 
   if (props.salesMethod) parts.push(props.salesMethod)
@@ -420,6 +480,16 @@ function formatKpiValue(card, value, rowLabel = '') {
   if (isPowerPriceKpiNA(rowLabel, 'profit', card.key)) return '—'
   if (props.coupang1pKpi && isCoupang1pRocketKpiNA(rowLabel, 'profit', card.key)) return '—'
   if (isSpecialSaleKpiNA(rowLabel, 'profit', card.key, props.manualFilterCtx?.specialSale)) return '—'
+  if (
+    isManualExpenseKpiNA(
+      rowLabel,
+      'profit',
+      card.key,
+      props.manualFilterCtx?.manualExpense,
+    )
+  ) {
+    return '—'
+  }
   return formatEsserProfitKpi(card.key, value)
 }
 
@@ -428,7 +498,11 @@ function formatAdKpiValue(card, value, rowLabel = '') {
   if (isPowerPriceKpiNA(rowLabel, 'ad', card.key)) return '—'
   if (props.coupang1pKpi && isCoupang1pRocketKpiNA(rowLabel, 'ad', card.key)) return '—'
   if (isSpecialSaleKpiNA(rowLabel, 'ad', card.key, props.manualFilterCtx?.specialSale)) return '—'
-  return formatEsserValue(card.key, value)
+  if (
+    isManualExpenseKpiNA(rowLabel, 'ad', card.key, props.manualFilterCtx?.manualExpense)
+  ) {
+    return '—'
+  }  return formatEsserValue(card.key, value)
 }
 
 </script>
@@ -437,7 +511,18 @@ function formatAdKpiValue(card, value, rowLabel = '') {
 
 <template>
 
-  <div v-if="!hasData" class="empty chart-empty">
+  <div v-if="kpiLoading" class="empty chart-empty kpi-loading">
+    <span class="segments-loading-spinner" aria-hidden="true" />
+    KPI를 불러오는 중입니다…
+  </div>
+
+  <div v-else-if="kpiError" class="empty chart-empty kpi-error">
+    <strong>KPI를 불러오지 못했습니다.</strong>
+    <span>{{ kpiError }}</span>
+    <span class="kpi-error-hint">NAS API(8080)가 켜져 있는지, 브라우저에서 새로고침(Ctrl+F5) 후 다시 시도하세요.</span>
+  </div>
+
+  <div v-else-if="!hasData" class="empty chart-empty">
     선택한 조회 기간에 표시할 데이터가 없습니다. 상단 조회 일자를 넓히거나 엑셀·직접입력 데이터를 확인하세요.
   </div>
 
@@ -1053,6 +1138,26 @@ function formatAdKpiValue(card, value, rowLabel = '') {
   to {
     transform: rotate(360deg);
   }
+}
+
+.kpi-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: #1e40af;
+}
+
+.kpi-error {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: flex-start;
+  color: #991b1b;
+}
+
+.kpi-error-hint {
+  font-size: 0.88rem;
+  color: var(--muted);
 }
 
 </style>

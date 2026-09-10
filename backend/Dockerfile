@@ -16,6 +16,7 @@ COPY backend/src ./backend/src
 COPY src/utils ./src/utils
 COPY src/config ./src/config
 COPY src/constants ./src/constants
+COPY src/services/adapters ./src/services/adapters
 COPY infra/db ./infra/db
 
 WORKDIR /app/backend

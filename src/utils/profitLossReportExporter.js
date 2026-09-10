@@ -5,9 +5,11 @@ import {
   resolveGroupTotalCost,
   expandPeriodUploadRowsForDaily,
   formatDayBucketLabel,
+  deriveEsserProfitKpis,
 } from './esserMetrics.js'
 import { summarizeKpis } from './salesAggregation.js'
 import { getSalesMethod, salesMethodGroupLabel } from './salesMethodDetect.js'
+import { resolveRecordPlatform } from './platformDetect.js'
 import {
   summarizeManualAdExportByDay,
   aggregateEsserByDayWithManual,
@@ -23,9 +25,11 @@ import {
   summarizeBrandKpis,
   COMBINED_BRAND_KPI_LABELS,
 } from './platformKpiSplit.js'
+import { combinedBrandDodKeyFromSegmentLabel } from './combinedKpiSegments.js'
 import {
   resolveRecordSourceLabel,
-  resolveCombinedBrandRollupLabel,
+  matchesCombinedReportBrand,
+  isEsserReportBrandChannel,
 } from './recordSourceLabel.js'
 import { MANUAL_AD_SOURCE_DEFS, isManualAdKpiLabel } from '../config/manualAdSpend.js'
 import { isPowerPriceRecord } from '../config/powerPrice.js'
@@ -38,17 +42,56 @@ import { normalizeStoreLabel } from './storeLabel.js'
 import { parseAmount } from './parseAmount.js'
 import { formatDayOverDayPct, salesComparisonSectionTitle, salesComparisonCurrentColumnLabel, salesComparisonPrevColumnLabel, salesComparisonChangeColumnLabel, resolveSalesComparisonMode } from './dayOverDaySales.js'
 import { buildIntegratedSegmentKpiExcelRows } from './integratedKpiExcel.js'
-import { buildCombinedCommentsExcelBlock } from './combinedCommentsExcel.js'
 import { COMBINED_HIDDEN_KPI_KEYS } from '../config/combinedChannel.js'
 import { UI_BUILD_ID } from '../constants/appVersion.js'
 import { summarizeSpecialSaleEntry, specialSaleEntryLabel, getSpecialSaleEntries, hasSpecialSaleEntryInput } from './specialSaleKpi.js'
 
 /** ①요약리포트 레이아웃 버전 — 엑셀에 표시해 적용 여부 확인 */
-export const INTEGRATED_REPORT_LAYOUT_VER = 31
+export const INTEGRATED_REPORT_LAYOUT_VER = 36
 
 const PERCENT_FIELDS = new Set(['netProfitRate', 'organicSalesRate', 'roas', 'salesRoas'])
 const POWER_PRICE_LABEL = '파워프라이스'
-const DAILY_BRAND_ORDER = ['베스트하임', '사본느리', POWER_PRICE_LABEL]
+const DAILY_BRAND_ORDER = ['베스트하임', '에쎄르', POWER_PRICE_LABEL]
+
+/** 통합 숫자 SoT — 세그먼트 KPI 합계 행 → 손익·엑셀 공통 */
+export function segmentTotalKpiFromRows(splitRows) {
+  const totalRow = (splitRows || []).find((r) => r.label === '합계')
+  if (!totalRow) return null
+  return finalizeEsserBucket({
+    sales: totalRow.profit?.sales ?? totalRow.ad?.sales ?? 0,
+    salesQty: totalRow.profit?.salesQty ?? totalRow.ad?.salesQty ?? 0,
+    totalCost: totalRow.profit?.totalCost ?? 0,
+    netProfit: totalRow.profit?.netProfit ?? totalRow.ad?.netProfit ?? 0,
+    adSpend: totalRow.ad?.adSpend ?? 0,
+    adSales: totalRow.ad?.adSales ?? 0,
+  })
+}
+
+/** 세그먼트 표 행합(합계·수동광고 제외) — G6 불변식용 */
+export function sumSegmentRowsExcludingTotal(splitRows) {
+  const acc = {
+    sales: 0,
+    totalCost: 0,
+    netProfit: 0,
+    adSpend: 0,
+    salesQty: 0,
+  }
+  for (const row of splitRows || []) {
+    if (!row || row.label === '합계' || isManualAdKpiLabel(row.label)) continue
+    acc.sales += row.profit?.sales || 0
+    acc.totalCost += row.profit?.totalCost || 0
+    acc.netProfit += row.profit?.netProfit || 0
+    acc.adSpend += row.ad?.adSpend || 0
+    acc.salesQty += row.profit?.salesQty || 0
+  }
+  // 수동광고 행은 광고·마진만
+  for (const row of splitRows || []) {
+    if (!row || !isManualAdKpiLabel(row.label)) continue
+    acc.netProfit += row.profit?.netProfit || 0
+    acc.adSpend += row.ad?.adSpend || 0
+  }
+  return acc
+}
 const HIDDEN_GROUP_LABELS = new Set(['미지정', '미분류', ''])
 const INTEGRATED_TITLE = '통합 매출 손익계산 요약 리포트'
 
@@ -334,6 +377,24 @@ function powerPriceManualEntries(channelGroups) {
   return (channelGroups || []).find((g) => g.label === POWER_PRICE_LABEL)?.entries || []
 }
 
+/**
+ * 스토어·일별 원가 — 쿠팡 등(합계 행 우선) + 스스(원가 없음 → 매출−마진)
+ * 세그먼트 KPI(bh_ss/sbn_ss estimateCostFromMargin)와 동일 규칙
+ */
+function totalCostCoupangPlusSmartStoreEstimate(group) {
+  const list = (group || []).filter((r) => !isReturnRecord(r))
+  const ss = list.filter((r) => resolveRecordPlatform(r) === '스마트스토어')
+  const other = list.filter((r) => resolveRecordPlatform(r) !== '스마트스토어')
+  const otherCost = summarizeEsserKpis(other).totalCost || 0
+  if (!ss.length) return otherCost
+  const ssKpi = summarizeEsserKpis(ss)
+  const ssCost = deriveEsserProfitKpis(ssKpi, {
+    estimateCostFromMargin: true,
+    productKpi: ssKpi,
+  }).totalCost
+  return otherCost + (ssCost || 0)
+}
+
 function summarizeStoreGroup(storeLabel, group, channelGroups, manualFilterCtx) {
   if (storeLabel === POWER_PRICE_LABEL) {
     const k = summarizePowerPriceKpis(group, powerPriceManualEntries(channelGroups), manualFilterCtx)
@@ -341,8 +402,7 @@ function summarizeStoreGroup(storeLabel, group, channelGroups, manualFilterCtx) 
   }
   const manual = manualEntriesForBrand(channelGroups, storeLabel)
   const k = summarizeEsserKpisWithManual(group, manual, manualFilterCtx)
-  const rawCost = summarizeKpis(group).totalCost
-  return { k, totalCost: resolveGroupTotalCost(storeLabel, group, k, rawCost) }
+  return { k, totalCost: totalCostCoupangPlusSmartStoreEstimate(group) }
 }
 
 function storeHasExternalAd(channelGroups, storeLabel, manualFilterCtx) {
@@ -361,21 +421,23 @@ function summarizeSalesMethodGroup(label, group, channelGroups, manualFilterCtx)
     return { k, totalCost: k.totalCost || summarizeKpis(group).totalCost }
   }
   const k = summarizeEsserKpis(group)
-  const rawCost = summarizeKpis(group).totalCost
-  return { k, totalCost: resolveGroupTotalCost(label, group, k, rawCost) }
+  // 합계 행 포함 KPI 원가 + 스스 판매방식은 매출−마진 역산
+  return { k, totalCost: resolveGroupTotalCost(label, group, k, k.totalCost || 0) }
 }
 
 function collectSalesMethodGroups(records, channelGroups = [], manualFilterCtx = {}) {
-  const productRows = (records || []).filter((r) => !isEsserSheetTotalRecord(r))
+  // 합계 행 포함 — 세그먼트 SoT(합계 행 매출·원가)와 판매방식 표 정합
+  const saleRows = (records || []).filter((r) => !isReturnRecord(r))
   const map = new Map()
-  for (const row of productRows) {
+  for (const row of saleRows) {
     const label = salesMethodLabelForRow(row)
     if (HIDDEN_GROUP_LABELS.has(label)) continue
     if (!map.has(label)) map.set(label, [])
     map.get(label).push(row)
   }
 
-  const allForKpi = (records || []).filter((r) => !isReturnRecord(r))
+  const productRows = saleRows.filter((r) => !isEsserSheetTotalRecord(r))
+  const allForKpi = saleRows
   const combinedTotal = summarizeCombinedKpis(
     allForKpi.length ? allForKpi : records,
     channelGroups,
@@ -401,30 +463,37 @@ function collectSalesMethodGroups(records, channelGroups = [], manualFilterCtx =
 
   body.push(...collectExternalAdSupplementRows(channelGroups, manualFilterCtx))
 
-  let salesMethodTotalCost = 0
-  for (const [label, group] of map.entries()) {
-    if (!shouldIncludeAggregateGroup(label, group)) continue
-    salesMethodTotalCost += summarizeSalesMethodGroup(
-      label,
-      group,
-      channelGroups,
-      manualFilterCtx,
-    ).totalCost
+  // 합계 = 표에 찍힌 행 합 (매출·원가·마진 행합≠합계 방지)
+  let sumSales = 0
+  let sumCost = 0
+  let sumQty = 0
+  let sumNet = 0
+  let sumAd = 0
+  let sumAdSales = 0
+  let sumOrganic = 0
+  for (const r of body) {
+    sumSales += parseAmount(r[1])
+    sumCost += parseAmount(r[2])
+    sumQty += parseAmount(r[3])
+    sumNet += parseAmount(r[4])
+    sumAd += parseAmount(r[6])
+    sumAdSales += parseAmount(r[7])
+    sumOrganic += parseAmount(r[8])
   }
 
   const totalRow = [
     '【합계】',
-    fmtAmt(combinedTotal.sales),
-    fmtAmt(salesMethodTotalCost),
-    fmtAmt(combinedTotal.salesQty),
-    fmtAmt(combinedTotal.netProfit),
-    fmtPctDisp(combinedTotal.netProfitRate),
-    fmtAmt(combinedTotal.adSpend),
-    fmtAmt(combinedTotal.adSales),
-    fmtAmt(combinedTotal.organicSales),
+    fmtAmt(sumSales),
+    fmtAmt(sumCost),
+    fmtAmt(sumQty),
+    fmtAmt(sumNet),
+    sumSales > 0 ? fmtPctDisp((sumNet / sumSales) * 100) : '',
+    fmtAmt(sumAd),
+    fmtAmt(sumAdSales),
+    fmtAmt(sumOrganic),
     totalSales ? '100.0%' : '',
   ]
-  return { body, totalRow, productRows }
+  return { body, totalRow, productRows, combinedTotal }
 }
 
 function buildPnlSummarySection(kpi, costKpi) {
@@ -561,6 +630,12 @@ function salesMethodDataRow(label, group, totalSales, channelGroups, manualFilte
 }
 
 function resolveStoreLabel(row) {
+  if (row?.coupang1pBrandKey === 'esser' || /에쎄르/i.test(String(row?.brand || ''))) {
+    return '에쎄르'
+  }
+  if (/에쎄르/i.test(String(row?.storeName || ''))) {
+    return '에쎄르'
+  }
   const store = String(row.storeName || '').trim()
   if (store && !HIDDEN_GROUP_LABELS.has(store)) {
     return normalizeStoreLabel(store, row)
@@ -570,80 +645,145 @@ function resolveStoreLabel(row) {
     return normalizeStoreLabel(brand, row)
   }
   const src = String(row.dataSourceLabel || '').trim()
-  if (src && !HIDDEN_GROUP_LABELS.has(src)) return src
+  if (src && !HIDDEN_GROUP_LABELS.has(src)) {
+    return normalizeStoreLabel(src, row)
+  }
   return ''
 }
 
-function buildStoreTableRows(records, channelGroups = [], manualFilterCtx = {}) {
-  const productRows = (records || []).filter((r) => !isEsserSheetTotalRecord(r))
-  const map = new Map()
-  for (const row of productRows) {
-    const key = resolveStoreLabel(row)
-    if (!key) continue
-    if (!map.has(key)) map.set(key, [])
-    map.get(key).push(row)
+/**
+ * 세그먼트 KPI 라벨 → 스토어 표 행 키
+ * 일별·전월대비와 동일: 베스트하임=마켓+BH폐쇄몰, 수기 특판·커스텀명은 라벨 그대로
+ */
+function storeRollupKeyFromSegmentRow(row) {
+  const s = String(row?.label || '').trim()
+  if (!s || s === '합계') return ''
+  if (isManualAdKpiLabel(s)) return s
+  if (
+    row?.kind === 'special_sale' ||
+    row?.segmentKey === 'special_sale' ||
+    row?.kind === 'manual_expense' ||
+    row?.segmentKey === 'manual_expense'
+  ) {
+    return normalizeStoreLabel(s) || s
   }
-  for (const { label } of channelGroups || []) {
-    if (!label || map.has(label)) continue
-    if (storeHasExternalAd(channelGroups, label, manualFilterCtx)) {
-      map.set(label, [])
-    }
+  const brand = combinedBrandDodKeyFromSegmentLabel(s)
+  if (brand === '베스트하임' || brand === '에쎄르' || brand === '파워프라이스') return brand
+  return normalizeStoreLabel(s) || s
+}
+
+function storeRollupKeyFromSegmentLabel(label) {
+  return storeRollupKeyFromSegmentRow({ label })
+}
+
+function emptyStoreRollup(label) {
+  return {
+    label,
+    sales: 0,
+    salesQty: 0,
+    totalCost: 0,
+    netProfit: 0,
+    adSpend: 0,
+    adSales: 0,
+    rowCount: 0,
+  }
+}
+
+function addSegmentRowToStoreRollup(acc, row) {
+  const p = row?.profit || {}
+  const a = row?.ad || {}
+  acc.sales += Number(p.sales) || 0
+  acc.salesQty += Number(p.salesQty) || 0
+  acc.totalCost += Number(p.totalCost) || 0
+  acc.netProfit += Number(p.netProfit) || 0
+  acc.adSpend += Number(a.adSpend) || 0
+  acc.adSales += Number(a.adSales) || 0
+  acc.rowCount += Number(row?.rowCount) || 0
+}
+
+function storeDataRowFromRollup(acc) {
+  const k = finalizeEsserBucket({
+    sales: acc.sales,
+    salesQty: acc.salesQty,
+    totalCost: acc.totalCost,
+    netProfit: acc.netProfit,
+    adSpend: acc.adSpend,
+    adSales: acc.adSales,
+  })
+  return [
+    acc.label,
+    fmtAmt(k.sales),
+    fmtAmt(k.totalCost),
+    fmtAmt(k.salesQty),
+    fmtAmt(k.netProfit),
+    fmtPctDisp(k.netProfitRate),
+    fmtAmt(k.adSpend),
+    fmtAmt(k.adSales),
+    fmtAmt(k.organicSales),
+    acc.rowCount > 0 ? acc.rowCount : '',
+  ]
+}
+
+/**
+ * 스토어별 손익 — 매출·수익(세그먼트) 행을 스토어 키로 재합산.
+ * 【전체 합계】= 세그먼트 합계(SoT)와 동일.
+ */
+function buildStoreTableRowsFromSplitRows(splitRows, sotKpi = null) {
+  /** @type {Map<string, ReturnType<typeof emptyStoreRollup>>} */
+  const map = new Map()
+  for (const row of splitRows || []) {
+    if (!row || row.label === '합계') continue
+    const key = storeRollupKeyFromSegmentRow(row)
+    if (!key) continue
+    if (!map.has(key)) map.set(key, emptyStoreRollup(key))
+    addSegmentRowToStoreRollup(map.get(key), row)
   }
 
-  const body = [...map.entries()]
+  const body = [...map.values()]
     .filter(
-      ([label, group]) =>
-        shouldIncludeAggregateGroup(label, group) ||
-        storeHasExternalAd(channelGroups, label, manualFilterCtx),
+      (acc) =>
+        Math.abs(acc.sales) > 0 ||
+        Math.abs(acc.totalCost) > 0 ||
+        Math.abs(acc.netProfit) > 0 ||
+        Math.abs(acc.adSpend) > 0 ||
+        Math.abs(acc.adSales) > 0 ||
+        acc.rowCount > 0,
     )
-    .sort(
-      (a, b) =>
-        summarizeStoreGroup(b[0], b[1], channelGroups, manualFilterCtx).k.sales -
-        summarizeStoreGroup(a[0], a[1], channelGroups, manualFilterCtx).k.sales,
-    )
-    .map(([store, group]) => {
-      const { k, totalCost } = summarizeStoreGroup(store, group, channelGroups, manualFilterCtx)
-      const qty = group.length
-      return [
-        store,
-        fmtAmt(k.sales),
-        fmtAmt(totalCost),
-        fmtAmt(k.salesQty),
-        fmtAmt(k.netProfit),
-        fmtPctDisp(k.netProfitRate),
-        fmtAmt(k.adSpend),
-        fmtAmt(k.adSales),
-        fmtAmt(k.organicSales),
-        qty > 0 ? qty : '',
-      ]
+    .sort((a, b) => b.sales - a.sales)
+    .map((acc) => storeDataRowFromRollup(acc))
+
+  const sot =
+    (sotKpi ? finalizeEsserBucket(sotKpi) : null) ||
+    segmentTotalKpiFromRows(splitRows) ||
+    finalizeEsserBucket({
+      sales: 0,
+      salesQty: 0,
+      totalCost: 0,
+      netProfit: 0,
+      adSpend: 0,
+      adSales: 0,
     })
 
-  for (const entry of getSpecialSaleEntries(manualFilterCtx?.specialSale)) {
-    const ssRow = specialSaleStoreRow(entry)
-    if (ssRow) body.push(ssRow)
-  }
-  body.sort((a, b) => parseAmount(b[1]) - parseAmount(a[1]))
-
-  const allForKpi = (records || []).filter((r) => !isReturnRecord(r))
-  const combinedTotal = summarizeCombinedKpis(
-    allForKpi.length ? allForKpi : records,
-    channelGroups,
-    manualFilterCtx,
-  )
   const totalRow = [
     '【전체 합계】',
-    fmtAmt(combinedTotal.sales),
-    fmtAmt(combinedTotal.totalCost),
-    fmtAmt(combinedTotal.salesQty),
-    fmtAmt(combinedTotal.netProfit),
-    fmtPctDisp(combinedTotal.netProfitRate),
-    fmtAmt(combinedTotal.adSpend),
-    fmtAmt(combinedTotal.adSales),
-    fmtAmt(combinedTotal.organicSales),
-    productRows.length || '',
+    fmtAmt(sot.sales),
+    fmtAmt(sot.totalCost),
+    fmtAmt(sot.salesQty),
+    fmtAmt(sot.netProfit),
+    sot.sales > 0 ? fmtPctDisp((sot.netProfit / sot.sales) * 100) : '',
+    fmtAmt(sot.adSpend),
+    fmtAmt(sot.adSales),
+    fmtAmt(sot.organicSales),
+    body.reduce((n, r) => n + (parseAmount(r[9]) || 0), 0) || '',
   ]
 
   return [['스토어별 손익 현황'], STORE_HEADERS, ...body, [], totalRow, []]
+}
+
+/** @deprecated 상품행 재집계 — 세그먼트 SoT 불일치. buildStoreTableRowsFromSplitRows 사용 */
+function buildStoreTableRows(records, channelGroups = [], manualFilterCtx = {}, sotKpi = null) {
+  const splitRows = buildKpiSplitRowsForChannel('통합', records, channelGroups, manualFilterCtx)
+  return buildStoreTableRowsFromSplitRows(splitRows, sotKpi)
 }
 
 function bucketToDailyDisplayRow(bucket, manualFilterCtx = {}) {
@@ -669,7 +809,7 @@ function inferSourceLabel(row) {
 }
 
 function filterRecordsBySourceLabel(records, sourceLabel) {
-  return (records || []).filter((r) => resolveCombinedBrandRollupLabel(r) === sourceLabel)
+  return (records || []).filter((r) => matchesCombinedReportBrand(r, sourceLabel))
 }
 
 function manualEntriesForBrand(channelGroups, brand) {
@@ -677,8 +817,28 @@ function manualEntriesForBrand(channelGroups, brand) {
     return (channelGroups || []).find((g) => g.label === POWER_PRICE_LABEL)?.entries || []
   }
   return (channelGroups || [])
-    .filter((g) => g.label === brand)
+    .filter((g) => {
+      if (brand === '에쎄르' && isEsserReportBrandChannel(g.label)) return true
+      return g.label === brand || normalizeStoreLabel(g.label) === brand
+    })
     .flatMap((g) => g.entries || [])
+}
+
+
+function ymdFromSortTime(sortTime) {
+  if (sortTime == null || Number.isNaN(Number(sortTime))) return ''
+  const d = new Date(Number(sortTime))
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+function rowYmdForDaily(row) {
+  const raw = String(getRecordDate(row) || '').trim()
+  const p = parseSalesDate(raw) || parseMonthDayLabel(raw, new Date().getFullYear())
+  if (!p) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`
 }
 
 function aggregateBrandDailyBuckets(brand, records, channelGroups, manualFilterCtx) {
@@ -690,7 +850,15 @@ function aggregateBrandDailyBuckets(brand, records, channelGroups, manualFilterC
   if (brand === POWER_PRICE_LABEL) {
     return aggregateEsserByDayWithManualSpendOnly(brandRecords, manual, manualFilterCtx)
   }
-  return aggregateEsserByDayWithManual(brandRecords, manual, manualFilterCtx)
+  const daily = aggregateEsserByDayWithManual(brandRecords, manual, manualFilterCtx)
+  // 일별 원가: 합계 행 우선(쿠팡) + 스스 매출−마진 (세그먼트·스토어와 동일)
+  return daily.map((bucket) => {
+    const ymd = ymdFromSortTime(bucket.sortTime)
+    const dayRows = ymd
+      ? brandRecords.filter((r) => !isReturnRecord(r) && rowYmdForDaily(r) === ymd)
+      : brandRecords
+    return { ...bucket, totalCost: totalCostCoupangPlusSmartStoreEstimate(dayRows) }
+  })
 }
 
 function dailyTotalRow(label, buckets) {
@@ -760,12 +928,6 @@ function buildDailyTableRows(saleRecords, channelGroups, manualFilterCtx) {
   return rows
 }
 
-/** ①요약리포트 맨 하단 — 통합 담당 코멘트 (비어 있어도 표 출력) */
-function appendIntegratedCommentsSection(rows, combinedComments) {
-  rows.push([])
-  rows.push(...buildCombinedCommentsExcelBlock(combinedComments))
-}
-
 /**
  * 통합 매출 손익계산 요약리포트 (①요약리포트) — 참고 양식 레이아웃
  * @param {object} ctx
@@ -779,12 +941,23 @@ export function buildIntegratedProfitLossSummaryRows(ctx) {
     totalKpi: totalKpiInput,
     costKpi = null,
     dayOverDayComputed = null,
-    combinedComments = null,
+    splitRows: splitRowsInput = null,
   } = ctx
 
+  // SoT: 세그먼트 KPI 합계 (화면·by-segment와 동일). 원가/매출/마진을 한 행에서 가져옴
+  const splitRows =
+    splitRowsInput ||
+    buildKpiSplitRowsForChannel('통합', saleRecords, channelGroups, manualFilterCtx)
+  const segmentTotal = segmentTotalKpiFromRows(splitRows)
   const totalKpi =
+    segmentTotal ||
     totalKpiInput ||
     summarizeCombinedKpis(saleRecords, channelGroups, manualFilterCtx)
+  const sotCostKpi = {
+    totalCost: costKpi?.totalCost ?? totalKpi.totalCost ?? 0,
+  }
+  // costKpi가 세그먼트와 다르면 세그먼트 원가 우선
+  if (segmentTotal) sotCostKpi.totalCost = segmentTotal.totalCost || 0
 
   const rows = []
   rows.push(mergeTitleRow(INTEGRATED_TITLE))
@@ -801,13 +974,13 @@ export function buildIntegratedProfitLossSummaryRows(ctx) {
       channelGroups,
       manualFilterCtx,
       COMBINED_HIDDEN_KPI_KEYS,
+      splitRows,
     ),
   )
-  rows.push(...buildIntegratedPnlSection(totalKpi, costKpi, dayOverDayComputed, filters))
-  rows.push(...buildSalesMethodSection(saleRecords, channelGroups, manualFilterCtx))
-  rows.push(...buildStoreTableRows(saleRecords, channelGroups, manualFilterCtx))
+  rows.push(...buildIntegratedPnlSection(totalKpi, sotCostKpi, dayOverDayComputed, filters))
+  // 스토어 = 세그먼트 KPI 재묶음 → 매출·수익·손익요약과 동일 SoT
+  rows.push(...buildStoreTableRowsFromSplitRows(splitRows, totalKpi))
   rows.push(...buildDailyTableRows(saleRecords, channelGroups, manualFilterCtx))
-  appendIntegratedCommentsSection(rows, combinedComments)
 
   return rows
 }

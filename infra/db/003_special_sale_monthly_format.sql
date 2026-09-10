@@ -32,3 +32,7 @@ WHERE kind = 'special_sale'
     OR data ? 'totalSales'
     OR data ? 'margin'
   );
+
+INSERT INTO schema_migrations (version, name)
+VALUES (3, '003_special_sale_monthly_format')
+ON CONFLICT (version) DO NOTHING;

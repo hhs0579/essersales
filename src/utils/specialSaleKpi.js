@@ -2,6 +2,15 @@ import { parseAmount, formatManualAdAmount, formatSignedManualAdAmount } from '.
 import { deriveEsserProfitKpis, finalizeEsserBucket } from './esserMetrics.js'
 import { SPECIAL_SALE_LABEL } from '../config/specialSale.js'
 
+/** YYYY-MM — `2026-8` 같이 한 자리 월도 허용 */
+export function padMonthKey(monthKey) {
+  const m = String(monthKey || '').match(/^(\d{4})-(\d{1,2})$/)
+  if (!m) return ''
+  const month = Number(m[2])
+  if (month < 1 || month > 12) return ''
+  return `${m[1]}-${String(month).padStart(2, '0')}`
+}
+
 /**
  * @param {{ name?: string, sales?: string, margin?: string } | null | undefined} entry
  */
@@ -32,6 +41,16 @@ export function getSpecialSaleEntries(data) {
     ]
   }
   return []
+}
+
+/** 수기 특판 매출 합 (원) */
+export function salesTotalFromSpecialSale(specialSale) {
+  let total = 0
+  for (const e of getSpecialSaleEntries(specialSale)) {
+    const n = Number(String(e?.sales ?? '').replace(/[^0-9.-]/g, ''))
+    if (Number.isFinite(n)) total += n
+  }
+  return total
 }
 
 /**
@@ -175,4 +194,108 @@ export function getSpecialSaleDisplayLabels(specialSale) {
 export function isSpecialSaleRowLabel(label, specialSale) {
   if (specialSale) return getSpecialSaleDisplayLabels(specialSale).has(label)
   return label === SPECIAL_SALE_LABEL
+}
+
+/**
+ * 월별 특판 맵에 등장하는 KPI 행 라벨 (커스텀 이름 포함)
+ * @param {Record<string, unknown[]> | Map<string, unknown[]> | null | undefined} monthlyMap
+ * @returns {Set<string>}
+ */
+export function collectSpecialSaleRowLabelsFromMonthlyMap(monthlyMap) {
+  const labels = new Set()
+  if (!monthlyMap) return labels
+  const values =
+    monthlyMap instanceof Map ? monthlyMap.values() : Object.values(monthlyMap)
+  for (const entries of values) {
+    for (const label of getSpecialSaleDisplayLabels({ entries })) {
+      labels.add(label)
+    }
+  }
+  return labels
+}
+
+/**
+ * app_settings special_sale raw → 해당 월 { entries }
+ * 월 키가 비면 months 중 최신 월. 지정 월이 없으면 빈 entries.
+ * @param {unknown} raw
+ * @param {string} [monthKey]
+ * @returns {{ entries: ReturnType<typeof normalizeSpecialSaleEntry>[] } | null}
+ */
+export function pickSpecialSaleSettingForMonth(raw, monthKey = '') {
+  if (!raw || typeof raw !== 'object') return null
+  const o = /** @type {Record<string, unknown>} */ (raw)
+
+  if (o.months && typeof o.months === 'object') {
+    const months = /** @type {Record<string, unknown>} */ (o.months)
+    const paddedWanted = padMonthKey(monthKey)
+    /** @type {Record<string, unknown>} */
+    const byPadded = {}
+    for (const [k, bucket] of Object.entries(months)) {
+      const pk = padMonthKey(k)
+      if (pk) byPadded[pk] = bucket
+    }
+    const pickKey = paddedWanted || Object.keys(byPadded).sort().pop() || ''
+    const bucket = pickKey ? byPadded[pickKey] : null
+    if (!bucket || typeof bucket !== 'object') return { entries: [] }
+    const entries = getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+      normalizeSpecialSaleEntry,
+    )
+    return { entries }
+  }
+
+  if (Array.isArray(o.entries) && o.entries.length) {
+    return { entries: o.entries.map((e) => normalizeSpecialSaleEntry(/** @type {Record<string, unknown>} */ (e))) }
+  }
+  if (o.totalSales || o.margin || o.marginRate) {
+    return {
+      entries: [
+        normalizeSpecialSaleEntry({
+          name: SPECIAL_SALE_LABEL,
+          sales: o.totalSales,
+          margin: o.margin,
+        }),
+      ],
+    }
+  }
+  return null
+}
+
+function ingestSpecialSaleMonths(target, raw, monthKey = '') {
+  if (!raw || typeof raw !== 'object') return
+  const o = /** @type {Record<string, unknown>} */ (raw)
+  if (o.months && typeof o.months === 'object') {
+    for (const [k, bucket] of Object.entries(/** @type {Record<string, unknown>} */ (o.months))) {
+      const pk = padMonthKey(k)
+      if (!pk) continue
+      const entries = getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+        normalizeSpecialSaleEntry,
+      )
+      if (entries.some((e) => e.name || e.sales || e.margin)) {
+        target[pk] = { entries }
+      }
+    }
+    return
+  }
+  const mk = padMonthKey(monthKey)
+  const entries = getSpecialSaleEntries(o).map(normalizeSpecialSaleEntry)
+  if (mk && entries.some((e) => e.name || e.sales || e.margin)) {
+    target[mk] = { entries }
+  }
+}
+
+/**
+ * DB 특판 + 클라 스냅샷 병합.
+ * 클라가 당월 { entries }만 보내도 전월 months 버킷을 지우지 않음.
+ * @param {unknown} dbRaw
+ * @param {unknown} overrideRaw
+ * @param {string} [monthKey]
+ */
+export function mergeSpecialSaleSettingRaw(dbRaw, overrideRaw, monthKey = '') {
+  if (!overrideRaw) return dbRaw ?? null
+  if (!dbRaw) return overrideRaw
+  /** @type {Record<string, { entries: ReturnType<typeof normalizeSpecialSaleEntry>[] }>} */
+  const months = {}
+  ingestSpecialSaleMonths(months, dbRaw, monthKey)
+  ingestSpecialSaleMonths(months, overrideRaw, monthKey)
+  return { months }
 }

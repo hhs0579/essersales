@@ -108,6 +108,7 @@ watch(
 .virtual-scroll-host.is-virtual {
   max-height: min(70vh, 640px);
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .virtual-inner-table {

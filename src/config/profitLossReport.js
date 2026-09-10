@@ -43,6 +43,7 @@ export const PROFIT_LOSS_FIELD_LABELS = {
 export const PROFIT_LOSS_BRAND_HEADERS = [
   '베스트하임',
   '사본느리',
+  '에쎄르',
   '파워프라이스',
   '합계',
   '종합',

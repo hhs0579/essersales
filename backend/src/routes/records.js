@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { listRecords } from '../repositories/recordsRepository.js'
+import { listTablePage } from '../services/legacyTableQueryService.js'
 import { patchSalesRecord, deleteSalesRecord } from '../services/recordsWriteService.js'
 import { invalidateKpiCache } from './kpi.js'
 
@@ -7,7 +8,15 @@ export const recordsRouter = Router()
 
 recordsRouter.get('/', async (req, res, next) => {
   try {
-    const result = await listRecords(req.query)
+    const rowKind = String(req.query.row_kind || '').toLowerCase()
+    const view = String(req.query.view || '').toLowerCase()
+    const tab = String(req.query.tab || '').toLowerCase()
+    const summaryTab =
+      tab === 'daily' || tab === 'channel' || tab === 'product' || tab === 'productOption'
+    const result =
+      view === 'table' || rowKind === 'sale' || rowKind === 'return' || summaryTab
+        ? await listTablePage(req.query)
+        : await listRecords(req.query)
     res.json(result)
   } catch (err) {
     next(err)

@@ -116,6 +116,14 @@ export function buildKpiQueryFromFilters(filters = {}, scope = '') {
   if (filters.salesMethod) qs.sales_method = filters.salesMethod
   if (filters.brand) qs.store_name = filters.brand
   if (scope) qs.scope = scope
+  // 월별 특판 수기 등 — 조회 월을 명시 (dateTo만 쓰면 7일 range에서 월이 밀림)
+  if (String(scope).includes('monthly')) {
+    const y = String(filters.year || '').trim()
+    const mo = String(filters.month || '').trim()
+    if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
+      qs.month = `${y}-${String(Number(mo)).padStart(2, '0')}`
+    }
+  }
   qs.include_manual_ads = 'true'
   return qs
 }

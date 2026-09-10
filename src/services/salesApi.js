@@ -6,16 +6,24 @@ import {
 } from './pgApiClient.js'
 import {
   fetchSalesRecords,
+  fetchSalesRecordsPage,
   fetchUploads,
   fetchRecordsByUploadIds,
   fetchDetailRecordsByUploadIds,
   fetchKpiSummary,
   fetchKpiDaily,
   fetchKpiByPlatform,
+  fetchKpiBySegment,
   fetchKpiCompareYesterday,
 } from './apiClient.js'
 
-export { fetchKpiSummary, fetchKpiDaily, fetchKpiByPlatform, fetchKpiCompareYesterday }
+export {
+  fetchKpiSummary,
+  fetchKpiDaily,
+  fetchKpiByPlatform,
+  fetchKpiBySegment,
+  fetchKpiCompareYesterday,
+}
 
 async function pgExcelUpload(file, fields) {
   const res = await pgUploadExcel(file, fields)
@@ -27,6 +35,8 @@ async function pgExcelUpload(file, fields) {
     count: res.count,
     uploadKind: res.uploadKind,
     platform: res.platform,
+    salesMethod: res.salesMethod,
+    parseMeta: res.parseMeta || null,
   }
 }
 
@@ -111,7 +121,13 @@ export async function savePlatformPeriodUpload({
   })
 }
 
-export { fetchSalesRecords, fetchUploads, fetchRecordsByUploadIds, fetchDetailRecordsByUploadIds }
+export {
+  fetchSalesRecords,
+  fetchSalesRecordsPage,
+  fetchUploads,
+  fetchRecordsByUploadIds,
+  fetchDetailRecordsByUploadIds,
+}
 
 export async function updateSalesRecord(id, fields) {
   return pgPatchSalesRecord(id, { fields })

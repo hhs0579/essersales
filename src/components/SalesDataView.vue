@@ -1,5 +1,14 @@
 <script setup>
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, toRefs, watch } from 'vue'
+import {
+  computed,
+  defineAsyncComponent,
+  onActivated,
+  onMounted,
+  onUnmounted,
+  ref,
+  toRefs,
+  watch,
+} from 'vue'
 import SalesRecordEditModal from './SalesRecordEditModal.vue'
 
 const SalesPeriodDashboard = defineAsyncComponent(() => import('./SalesPeriodDashboard.vue'))
@@ -8,6 +17,7 @@ import {
   RECORD_TAB_KEYS_MAIN,
   RECORD_TAB_KEY_RETURNS,
   sanitizeDetailColumns,
+  SERVER_PAGED_TABLE_TABS,
 } from '../constants/salesColumns'
 import { formatCellValue, isNumericColumn, resolveDetailField } from '../utils/formatDisplay.js'
 import { useSalesData } from '../composables/useSalesData.js'
@@ -27,7 +37,8 @@ import {
 import { EXTERNAL_AD_CHANNELS, resolveExternalAdScope } from '../config/externalAdChannels.js'
 import { COMBINED_HIDDEN_KPI_KEYS } from '../config/combinedChannel.js'
 import { POWER_PRICE_HIDDEN_KPI_KEYS } from '../config/powerPrice.js'
-import { COUPANG_1P_ROCKET_HIDDEN_KPI_KEYS } from '../config/coupang1pRocket.js'
+import { COUPANG_1P_ROCKET_HIDDEN_KPI_KEYS, COUPANG_1P_ROCKET_BRANDS } from '../config/coupang1pRocket.js'
+import { filterCoupang1pRecordsByBrand } from '../services/adapters/coupang1pKpiMerge.js'
 import { getManualAdSnapshot } from '../composables/useManualAdSpend.js'
 import { maxReportDateYmd } from '../utils/reportDateRange.js'
 import VirtualScrollTableBody from './VirtualScrollTableBody.vue'
@@ -37,16 +48,23 @@ import ManualAdSpendPanel from './ManualAdSpendPanel.vue'
 import PowerPricePanel from './PowerPricePanel.vue'
 import Coupang1pRocketPanel from './Coupang1pRocketPanel.vue'
 import SpecialSalePanel from './SpecialSalePanel.vue'
+import ManualExpensePanel from './ManualExpensePanel.vue'
 import { useManualAdSpend } from '../composables/useManualAdSpend.js'
 import { ownMallManualDetailRecords } from '../composables/useOwnMallManual.js'
 import { powerPriceDetailRecords } from '../composables/usePowerPrice.js'
 import { coupang1pRocketDetailRecords } from '../composables/useCoupang1pRocket.js'
 import { mergeDashboardManualInputRecords } from '../utils/dashboardKpiRecords.js'
-import { getCombinedCommentsSnapshot } from '../composables/useCombinedComments.js'
-import { getSpecialSaleSnapshot, getSpecialSaleMonthlyMap } from '../composables/useSpecialSale.js'
+import { getSpecialSaleSnapshot, getSpecialSaleMonthlyMap, getSpecialSaleReactiveStore, hydrateSpecialSaleForScope } from '../composables/useSpecialSale.js'
+import {
+  getManualExpenseSnapshot,
+  getManualExpenseReactiveStore,
+  hydrateManualExpenseForScope,
+} from '../composables/useManualExpense.js'
+import { collectSpecialSaleRowLabelsFromMonthlyMap } from '../utils/specialSaleKpi.js'
 import {
   buildSpecialSaleMonthlyTotals,
   resolveReferenceMonthKey,
+  addMonthsToMonthKey,
 } from '../utils/dayOverDaySales.js'
 import { findExternalAdChannelByScope } from '../config/externalAdChannels.js'
 import { PLATFORM_OPTIONS } from '../constants/platforms.js'
@@ -66,6 +84,7 @@ const isPowerPriceScope = computed(() => isPowerPriceScopeFn(props.scope))
 const isCoupang1pScope = computed(() => isCoupang1pRocketScopeFn(props.scope))
 const isOtherSellersScope = computed(() => isOtherSellersScopeFn(props.scope))
 const isManualInputScope = computed(() => isPowerPriceScope.value || isCoupang1pScope.value)
+const coupang1pBrandKey = ref('bestheim')
 const isMonthlyEsserScope = computed(() => isMonthlyScope(props.scope))
 const isDailyEsserScope = computed(() => usesEsserDashboard(props.scope) && !isMonthlyEsserScope.value)
 const isEsserScope = computed(() => usesEsserDashboard(props.scope) || isMonthlyEsserScope.value)
@@ -87,11 +106,12 @@ const pageMeta = computed(() => {
     }
   }
   if (isCoupang1pScope.value) {
+    const brand = COUPANG_1P_ROCKET_BRANDS.find((b) => b.key === coupang1pBrandKey.value)
     return {
-      dashboardTitle: `${channel?.tabLabel || '쿠팡 1P 로켓'} 발주 대시보드`,
+      dashboardTitle: `쿠팡 1P 로켓 · ${brand?.tabLabel || '베스트하임'} 발주 대시보드`,
       dashboardHint:
-        '발주 직접입력 KPI입니다. 공급매출·매입원가가 쿠팡 행에 표시되며, 베스트하임 일별 매출 대시보드 쿠팡 KPI에도 합산됩니다.',
-      dataTitle: `${channel?.tabLabel || '쿠팡 1P 로켓'} · 발주 데이터`,
+        '브랜드별 상품·발주 직접입력 KPI입니다. 베스트하임은 베스트하임 쿠팡 KPI, 에쎄르는 사본느리 쿠팡 KPI에 합산됩니다.',
+      dataTitle: `쿠팡 1P 로켓 · ${brand?.tabLabel || '베스트하임'} 발주 데이터`,
       emptyHint: '상품과 발주를 등록하면 표·대시보드에 반영됩니다.',
       showPeriodDashboard: true,
       showUploadPicker: false,
@@ -107,8 +127,8 @@ const pageMeta = computed(() => {
         ? '통합 월별 매출 대시보드'
         : '베스트하임·사본느리·파워프라이스 통합 대시보드',
       dashboardHint: monthly
-        ? '일별 매출 데이터를 월 단위로 자동 집계합니다. 특판 매출은 월별로 저장·합산되며, 전월 대비 매출을 확인할 수 있습니다.'
-        : '주간 보고용 — 베스트하임(판매자+그로스·로켓·스스)·사본느리(판매자·스스·자사몰)·파워프라이스·외부광고 순으로 KPI를 표시합니다. 쿠팡 1P 로켓 발주는 베스트하임(로켓)에 포함됩니다.',
+        ? '월별 매출입니다. 기간을 직접 지정할 수 있고, 특판 수기는 이 화면·엑셀에만 반영됩니다. 일별 매출에는 특판이 들어가지 않습니다.'
+        : '주간 보고용 — 베스트하임(판매자·그로스·로켓·스스)·사본느리(판매자·그로스)·에쎄르(로켓)·사본느리(스스·자사몰)·파워프라이스·외부광고 순으로 KPI를 표시합니다.',
       dataTitle: monthly ? '통합 월별 매출 · 판매 데이터 (일별 기반 자동 집계)' : '통합 일별 매출 · 판매 데이터',
       emptyHint:
         '베스트하임·사본느리 일별 엑셀 업로드와 파워프라이스 직접 입력이 통합 탭에 자동 반영됩니다.',
@@ -159,13 +179,6 @@ const pageMeta = computed(() => {
 })
 
 const sales = useSalesData({ scope: props.scope })
-const salesRoot = useSalesData()
-const {
-  detailCacheLoading,
-  detailCacheError,
-  detailCacheLoaded,
-} = toRefs(salesRoot)
-const { retryDetailCache: retryDetailCacheGlobal } = salesRoot
 const {
   activeTab,
   loading,
@@ -183,22 +196,29 @@ const {
   dashboardDayOverDayRecords,
   sortedFilteredRecords,
   recordsForActiveTab,
+  tablePagination,
+  tableLoading,
+  tableSaleTotal,
+  tableReturnTotal,
   availableYears,
   monthOptions,
   weekdayOptions,
   scopedUploads,
+  selectedUploadIds,
   serverKpiBucket,
   serverPlatformKpiRows,
+  serverPrevMonthPlatformKpiRows,
   serverDayOverDayRows,
   serverKpiLoaded,
   usesServerKpiMode,
 } = toRefs(sales)
 const {
+  ensureCoreLoaded,
   ensureDashboardReady,
-  ensureDetailForScope,
-  retryDetailCache,
   refreshAll,
   switchTab,
+  goTablePage,
+  loadTablePage,
   openEdit,
   onSaveEdit,
   onDelete,
@@ -208,6 +228,19 @@ const {
   resolveTableColumns,
   reloadServerKpi,
 } = sales
+
+function filterByCoupangBrand(records) {
+  if (!isCoupang1pScope.value) return records
+  return filterCoupang1pRecordsByBrand(records || [], coupang1pBrandKey.value)
+}
+
+const displayFilteredDetailForCharts = computed(() =>
+  filterByCoupangBrand(filteredDetailForCharts.value),
+)
+const displaySortedFilteredRecords = computed(() =>
+  filterByCoupangBrand(sortedFilteredRecords.value),
+)
+const displaySaleDetails = computed(() => filterByCoupangBrand(scopedSaleDetails.value))
 
 /** 월별 대시보드는 조회 월만 다루므로 초기화 시 기본 월로 되돌립니다. */
 function clearFilters() {
@@ -243,9 +276,15 @@ function tdClass(key, row) {
 function pillClass(key, row) {
   const v = resolveDetailField(row, key)
   if (!v) return 'pill-muted'
+  if (key === 'dataSourceLabel') {
+    if (v === '수기작성') return 'pill-manual'
+    if (v === '기타 판매처') return 'pill-other'
+  }
   if (key === 'platform') {
     if (v === '스마트스토어') return 'pill-smartstore'
     if (v === '쿠팡') return 'pill-coupang'
+    if (v === '특판 폐쇄몰') return 'pill-other'
+    if (v === '수기작성') return 'pill-manual'
   }
   if (key === 'salesMethod') {
     if (v === '일반배송') return 'pill-general'
@@ -268,7 +307,7 @@ const periodSummary = computed(() => {
 
 const hasAnyData = computed(
   () =>
-    scopedSaleDetails.value.length > 0 ||
+    displaySaleDetails.value.length > 0 ||
     scopedReturnDetails.value.length > 0 ||
     scopedUploads.value.length > 0 ||
     (isCombined.value &&
@@ -282,11 +321,19 @@ const hasAnyData = computed(
 
 /** Server KPI 로드 후에는 상세 캐시 로딩 중에도 대시보드 유지 */
 const showPeriodDashboardSection = computed(
-  () =>
-    pageMeta.value.showPeriodDashboard &&
-    hasAnyData.value &&
-    (!loading.value || serverKpiLoaded.value),
+  () => pageMeta.value.showPeriodDashboard && (isEsserScope.value || hasAnyData.value),
 )
+
+const dashboardKpiLoading = computed(
+  () => usesServerKpiMode.value && loading.value && !serverKpiLoaded.value,
+)
+
+const dashboardKpiError = computed(() => {
+  if (!usesServerKpiMode.value || !serverKpiLoaded.value) return ''
+  if (serverKpiBucket.value != null || serverPlatformKpiRows.value.length > 0) return ''
+  const msg = String(error.value || '').trim()
+  return msg.includes('KPI') ? msg : msg ? `KPI API: ${msg}` : ''
+})
 
 /** PG export는 API가 DB에서 직접 조회 — 상세 캐시 없어도 다운로드 가능.
  * 서버 KPI 모드에서는 filteredDetailForCharts를 건드리지 않음 (날짜 변경 시 전량 필터 렉 방지). */
@@ -298,7 +345,7 @@ const canDownloadDashboard = computed(() => {
   ) {
     return true
   }
-  return filteredDetailForCharts.value.length > 0
+  return displayFilteredDetailForCharts.value.length > 0
 })
 
 const tableEmptyHint = computed(() => {
@@ -308,7 +355,7 @@ const tableEmptyHint = computed(() => {
   return pageMeta.value.emptyHint
 })
 
-const returnTabCount = computed(() => scopedReturnDetails.value.length)
+const returnTabCount = computed(() => tableReturnTotal.value)
 
 // 월별 대시보드도 일별 데이터 기반 — 광고는 일별 scope에서 조회 (일별=월별 동일)
 const adScope = computed(() =>
@@ -343,10 +390,13 @@ const manualFilterCtx = computed(() => ({
   period: isMonthlyEsserScope.value ? 'monthly' : 'daily',
 }))
 
-/** 월별 대시보드 — 선택 월의 1일~말일로 기간 자동 설정 */
+/** 월별 대시보드 — 연·월 선택 시 해당 월 1일~말일로 맞춥니다. 이후 기간은 직접 수정 가능. */
 function lastDayOfMonth(year, month) {
   return new Date(year, month, 0).getDate()
 }
+
+let applyingMonthPreset = false
+let syncingMonthFromDates = false
 
 function applyMonthlyPeriodFromFilters() {
   if (!isMonthlyEsserScope.value) return
@@ -357,12 +407,23 @@ function applyMonthlyPeriodFromFilters() {
   const padMo = String(month).padStart(2, '0')
   const last = lastDayOfMonth(Number(y), month)
   filters.value.dayOfWeek = ''
+  applyingMonthPreset = true
   filters.value.dateFrom = `${y}-${padMo}-01`
   filters.value.dateTo = `${y}-${padMo}-${String(last).padStart(2, '0')}`
+  applyingMonthPreset = false
 }
 
 /** 데이터에서 기본월을 잡았는지 (사용자 선택 전 최신월 자동 지정) */
 let reportMonthResolvedFromData = false
+
+/** 월별 기본 조회월 — DB detail 없어도 자사몰·파워프라이스·1P 직접입력 반영 */
+function recordsForDefaultReportMonth() {
+  return mergeDashboardManualInputRecords(scopedSaleDetails.value, props.scope, {}, {
+    powerPrice: powerPriceDetailRecords.value,
+    ownMall: ownMallManualDetailRecords.value,
+    coupang1p: coupang1pRocketDetailRecords.value,
+  })
+}
 
 /** 월별 대시보드 진입 시 기본 조회 월을 데이터 최신월로 설정 (날짜 필터 미적용 데이터 기준) */
 function ensureDefaultReportMonth() {
@@ -371,7 +432,7 @@ function ensureDefaultReportMonth() {
     applyMonthlyPeriodFromFilters()
     return
   }
-  const mk = resolveReferenceMonthKey(scopedSaleDetails.value, { period: 'monthly' })
+  const mk = resolveReferenceMonthKey(recordsForDefaultReportMonth(), { period: 'monthly' })
   if (!mk) {
     // 데이터 로딩 전 — 현재 월로 임시 지정, 데이터 도착 시 재지정
     if (!filters.value.year || !filters.value.month) {
@@ -396,11 +457,32 @@ function currentDashboardMonthKey() {
 
 watch(
   () => [filters.value.year, filters.value.month],
-  () => applyMonthlyPeriodFromFilters(),
+  () => {
+    if (syncingMonthFromDates) return
+    applyMonthlyPeriodFromFilters()
+  },
 )
 
-/** 특판·전월대비 기준월 (YYYY-MM) — 필터된 detail 전량 조회 금지 */
+watch(
+  () => [filters.value.dateFrom, filters.value.dateTo],
+  ([from, to]) => {
+    if (!isMonthlyEsserScope.value || applyingMonthPreset) return
+    const key = String(to || from || '').trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return
+    const y = key.slice(0, 4)
+    const mo = String(Number(key.slice(5, 7)))
+    if (filters.value.year === y && String(filters.value.month) === mo) return
+    syncingMonthFromDates = true
+    filters.value.year = y
+    filters.value.month = mo
+    syncingMonthFromDates = false
+  },
+)
+
+/** 특판·전월대비 기준월 (YYYY-MM) — 조회 종료일(또는 선택 월) 기준 */
 const specialSaleMonthKey = computed(() => {
+  const to = String(filters.value.dateTo || filters.value.dateFrom || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(to)) return to.slice(0, 7)
   const y = String(filters.value.year || '').trim()
   const mo = String(filters.value.month || '').trim()
   if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
@@ -411,13 +493,26 @@ const specialSaleMonthKey = computed(() => {
 
 function buildSpecialSaleContext() {
   if (!isCombined.value || !isMonthlyEsserScope.value) {
-    return { specialSale: null, specialSaleByMonth: null }
+    return {
+      specialSale: null,
+      specialSalePrev: null,
+      specialSaleByMonth: null,
+      specialSaleRowLabels: [],
+      manualExpense: null,
+    }
   }
   const mk = specialSaleMonthKey.value
   const monthlyMap = getSpecialSaleMonthlyMap(props.scope, mk)
+  const prevMk = mk ? addMonthsToMonthKey(mk, -1) : ''
   return {
     specialSale: getSpecialSaleSnapshot(props.scope, mk),
+    specialSalePrev: prevMk
+      ? getSpecialSaleSnapshot(props.scope, prevMk, { allowLegacy: false })
+      : { entries: [] },
     specialSaleByMonth: buildSpecialSaleMonthlyTotals(monthlyMap),
+    specialSaleMonthlyMap: monthlyMap,
+    specialSaleRowLabels: [...collectSpecialSaleRowLabelsFromMonthlyMap(monthlyMap)],
+    manualExpense: getManualExpenseSnapshot(props.scope, mk),
   }
 }
 
@@ -455,13 +550,18 @@ function applyLightDashboardMeta() {
   dashboardKpiFilterCtx.value = {
     ...manualFilterCtx.value,
     specialSale: ssCtx.specialSale,
+    specialSalePrev: ssCtx.specialSalePrev || null,
     specialSaleByMonth: ssCtx.specialSaleByMonth,
-    combinedComments: isCombined.value
-      ? getCombinedCommentsSnapshot(props.scope, {
-          dateFrom: filters.value.dateFrom || '',
-          dateTo: filters.value.dateTo || '',
-        })
-      : null,
+    specialSaleMonthlyMap: ssCtx.specialSaleMonthlyMap || null,
+    specialSaleRowLabels: ssCtx.specialSaleRowLabels || [],
+    manualExpense: ssCtx.manualExpense || null,
+  }
+  // 서버 KPI only — 클라 스냅샷이 남아 전월대비 합계가 매출·수익과 어긋나지 않게 비움
+  // 전월대비 전월 보완용 dayOverDay lookup 은 유지·갱신
+  if (shouldSkipClientKpiSnapshot()) {
+    dashboardKpiRecords.value = []
+    dashboardKpiPlatformSplit.value = []
+    dashboardKpiDayOverDay.value = dashboardDayOverDayRecords.value
   }
 }
 
@@ -470,16 +570,14 @@ function syncDashboardKpiSnapshot() {
   const filterCtx = {
     ...manualFilterCtx.value,
     specialSale: ssCtx.specialSale,
+    specialSalePrev: ssCtx.specialSalePrev || null,
     specialSaleByMonth: ssCtx.specialSaleByMonth,
-    combinedComments: isCombined.value
-      ? getCombinedCommentsSnapshot(props.scope, {
-          dateFrom: filters.value.dateFrom || '',
-          dateTo: filters.value.dateTo || '',
-        })
-      : null,
+    specialSaleMonthlyMap: ssCtx.specialSaleMonthlyMap || null,
+    specialSaleRowLabels: ssCtx.specialSaleRowLabels || [],
+    manualExpense: ssCtx.manualExpense || null,
   }
   dashboardKpiRecords.value = mergeDashboardManualInputRecords(
-    filteredDetailForCharts.value,
+    displayFilteredDetailForCharts.value,
     props.scope,
     filterCtx,
     {
@@ -497,16 +595,18 @@ function syncDashboardKpiSnapshot() {
 
 /**
  * 서버 KPI 대시보드만 클라 detail 스냅샷 생략.
- * 통합·직접입력은 세그먼트/수기 행을 위해 스냅샷 필수.
+ * 통합은 by-segment로 표 채움 → 스냅샷 불필요. 직접입력(PP/1P)만 클라 집계.
  */
 function shouldSkipClientKpiSnapshot() {
   if (!usesServerKpiMode.value || !isServerKpiOnly()) return false
-  if (isPowerPriceScope.value || isCoupang1pScope.value || isCombined.value) return false
-  return serverKpiLoaded.value || serverKpiBucket.value != null
+  if (isPowerPriceScope.value) return false
+  if (isCoupang1pScope.value) return false
+  return Boolean(serverKpiBucket.value != null || serverPlatformKpiRows.value.length > 0)
 }
 
 function usesDeferredCombinedSegmentSync() {
-  return isCombined.value && usesServerKpiMode.value && isServerKpiOnly()
+  // R1: 통합 세그먼트는 서버 by-segment — 클라 buildCombined 지연 동기화 불필요
+  return false
 }
 
 let dashboardKpiTimer = null
@@ -550,11 +650,31 @@ watch(
     manualAdEntriesForDashboard,
     () => props.scope,
     coupang1pRocketDetailRecords,
+    coupang1pBrandKey,
     powerPriceDetailRecords,
     ownMallManualDetailRecords,
   ],
   scheduleDashboardKpiRefresh,
 )
+
+/** 특판·수기 지출 hydrate·저장 후 KPI 즉시 반영 */
+watch(
+  () => {
+    if (!isCombined.value || !isMonthlyEsserScope.value) return ''
+    const ss = getSpecialSaleReactiveStore(props.scope)
+    const me = getManualExpenseReactiveStore(props.scope)
+    return `${specialSaleMonthKey.value}|ss:${JSON.stringify(ss.months)}|me:${JSON.stringify(me.months)}`
+  },
+  () => {
+    applyLightDashboardMeta()
+  },
+)
+
+watch(specialSaleMonthKey, (mk) => {
+  if (!isCombined.value || !isMonthlyEsserScope.value || !mk) return
+  hydrateSpecialSaleForScope(props.scope, { forceRefresh: true }).catch(() => {})
+  hydrateManualExpenseForScope(props.scope, { forceRefresh: true }).catch(() => {})
+})
 
 const SERVER_KPI_RELOAD_DEBOUNCE_MS = 400
 let serverKpiReloadTimer = null
@@ -569,6 +689,8 @@ function reloadServerKpiImmediate() {
 
 function scheduleServerKpiReload() {
   if (!usesServerKpiMode.value) return
+  // 콜드 부트 KPI 로딩 중 watch 재요청으로 abort/시퀀스 밀림 방지
+  if (loading.value && !serverKpiLoaded.value) return
   if (serverKpiReloadTimer) clearTimeout(serverKpiReloadTimer)
   serverKpiReloadTimer = setTimeout(() => {
     serverKpiReloadTimer = null
@@ -596,22 +718,20 @@ watch(
   { deep: true },
 )
 
-watch(detailCacheLoaded, (loaded) => {
-  // 통합: detail 도착 시 브랜드 세그먼트 스냅샷 갱신 (상단 KPI는 serverKpiBucket 유지)
-  if (loaded && isCombined.value) {
-    scheduleDashboardKpiRefresh()
+async function bootstrapDashboard() {
+  await ensureCoreLoaded()
+  if (isMonthlyEsserScope.value) {
+    ensureDefaultReportMonth()
   }
-})
-
-onMounted(async () => {
   await ensureDashboardReady(props.scope)
-  ensureDefaultReportMonth()
+  if (isMonthlyEsserScope.value) {
+    ensureDefaultReportMonth()
+  }
   if (shouldSkipClientKpiSnapshot()) {
     applyLightDashboardMeta()
   } else if (usesDeferredCombinedSegmentSync()) {
     applyLightDashboardMeta()
-    combinedSegmentRefreshPending.value = !detailCacheLoaded.value || !dashboardKpiRecords.value.length
-    // 첫 페인트(서버 KPI) 후 idle에 세그먼트 집계 — 탭 진입 렉 완화
+    combinedSegmentRefreshPending.value = !dashboardKpiRecords.value.length
     const run = () => scheduleDashboardKpiRefresh()
     if (typeof requestIdleCallback === 'function') {
       requestIdleCallback(run, { timeout: 900 })
@@ -621,59 +741,139 @@ onMounted(async () => {
   } else {
     scheduleDashboardKpiRefresh()
   }
+}
+
+/** KeepAlive: 첫 mount의 onActivated는 onMounted가 처리 — 재방문만 soft refresh */
+const didMountBootstrap = ref(false)
+
+onMounted(async () => {
+  await bootstrapDashboard()
+  didMountBootstrap.value = true
+})
+
+onActivated(() => {
+  if (!usesServerKpiMode.value || !didMountBootstrap.value) return
+  void ensureDashboardReady(props.scope)
 })
 
 watch(scopedSaleDetails, () => {
   ensureDefaultReportMonth()
 })
 
+watch(
+  [ownMallManualDetailRecords, powerPriceDetailRecords, coupang1pRocketDetailRecords],
+  () => {
+    if (!isMonthlyEsserScope.value) return
+    const mk = resolveReferenceMonthKey(recordsForDefaultReportMonth(), { period: 'monthly' })
+    if (!mk) return
+    const [y, mo] = mk.split('-')
+    const wantMo = String(Number(mo))
+    if (filters.value.year === y && String(filters.value.month) === wantMo) return
+    filters.value.year = y
+    filters.value.month = wantMo
+    reportMonthResolvedFromData = true
+    applyMonthlyPeriodFromFilters()
+  },
+  { deep: true },
+)
+
+const tableOpened = ref(false)
+let tableReloadTimer = null
+
 async function onDataSectionExpand() {
+  tableOpened.value = true
   try {
-    await ensureDetailForScope()
+    await loadTablePage({ page: 1 })
   } catch {
     /* error set in composable */
   }
 }
 
-async function retryDetailCacheLoad() {
+function scheduleTableReload() {
+  if (!tableOpened.value) return
+  const tab = activeTab.value
+  if (tab !== 'detail' && tab !== 'returns') return
+  if (tableReloadTimer) clearTimeout(tableReloadTimer)
+  tableReloadTimer = setTimeout(() => {
+    tableReloadTimer = null
+    void loadTablePage({ page: 1 })
+  }, 400)
+}
+
+async function retryTableLoad() {
   try {
-    await retryDetailCacheGlobal()
-    await ensureDetailForScope()
+    await loadTablePage({ page: tablePagination.value.page || 1 })
   } catch {
     /* error set */
   }
 }
 
+watch(
+  [
+    () => filters.value.dateFrom,
+    () => filters.value.dateTo,
+    () => filters.value.year,
+    () => filters.value.month,
+    () => filters.value.dayOfWeek,
+    () => filters.value.platform,
+    () => filters.value.salesMethod,
+    () => filters.value.channel,
+    () => filters.value.brand,
+    () => filters.value.productName,
+    () => filters.value.option,
+    () => filters.value.date,
+    selectedUploadIds,
+  ],
+  scheduleTableReload,
+)
+
 onUnmounted(() => {
   if (manualAdDashboardTimer) clearTimeout(manualAdDashboardTimer)
   if (dashboardKpiTimer) clearTimeout(dashboardKpiTimer)
   if (serverKpiReloadTimer) clearTimeout(serverKpiReloadTimer)
+  if (tableReloadTimer) clearTimeout(tableReloadTimer)
 })
 
-/** 통합 브랜드 세그먼트 대기 (쿠팡/스스 임시 표시 · 날짜 변경 재집계 중) */
+/** 통합 세그먼트 — 서버 by-segment 대기 */
 const combinedSegmentsLoading = computed(
   () =>
     isCombined.value &&
     usesServerKpiMode.value &&
-    (detailCacheLoading.value ||
-      !detailCacheLoaded.value ||
-      combinedSegmentRefreshPending.value),
+    !serverKpiLoaded.value &&
+    !serverPlatformKpiRows.value.length,
 )
 
 /** 접힌 데이터 섹션 actions에서 sortedFilteredRecords 평가 금지 */
 const hasTableRowsHint = computed(
   () =>
-    scopedSaleDetails.value.length > 0 ||
-    scopedReturnDetails.value.length > 0 ||
-    (detailCacheLoaded.value && scopedDetailRecords.value.length > 0),
+    tableSaleTotal.value > 0 ||
+    tableReturnTotal.value > 0 ||
+    tablePagination.value.total > 0 ||
+    hasAnyData.value,
 )
 
 const dataSectionSubtitle = computed(() => {
-  const n = scopedSaleDetails.value.length
+  const n = tableSaleTotal.value
   const hint = '상품·판매처별 상세 표 (기본 접힘 — 펼치면 표시)'
   if (n > 0) return `${hint} · 판매 ${n.toLocaleString('ko-KR')}건`
-  if (detailCacheLoading.value) return `${hint} · 상세 데이터 불러오는 중…`
+  if (tableLoading.value) return `${hint} · 상세 데이터 불러오는 중…`
   return hint
+})
+
+const isPagedTableTab = computed(() => SERVER_PAGED_TABLE_TABS.has(activeTab.value))
+const isLineItemTableTab = computed(
+  () => activeTab.value === 'detail' || activeTab.value === 'returns',
+)
+
+/** 서버 페이지(100건)는 가상 스크롤 불필요. 켜면 행높이 오차+이중 스크롤로 표가 떨림 */
+const tableVirtualThreshold = computed(() => (isPagedTableTab.value ? 1000 : 80))
+const useVirtualTable = computed(
+  () => sortedFilteredRecords.value.length > tableVirtualThreshold.value,
+)
+
+const tableTotalCount = computed(() => {
+  if (isPagedTableTab.value) return tablePagination.value.total || 0
+  return recordsForActiveTab.value.length
 })
 
 const salesMethodFilterOptions = computed(() =>
@@ -689,6 +889,13 @@ const monthlyYearOptions = computed(() => {
 <template>
   <CollapsibleSection title="조회 조건" card-class="filters-panel">
     <div v-if="isMonthlyEsserScope" class="filters-month-block">
+      <div class="filters-date-block">
+        <DatePeriodFilter
+          v-model:date-from="filters.dateFrom"
+          v-model:date-to="filters.dateTo"
+          :max-date="maxReportDateYmd()"
+        />
+      </div>
       <div class="filters-month-row">
         <label class="filter-field">
           <span class="field-label">연도</span>
@@ -703,11 +910,16 @@ const monthlyYearOptions = computed(() => {
           </select>
         </label>
         <span class="month-only-hint">
-          선택한 월 1일~말일 일별 매출을 자동 집계합니다.
+          연·월을 바꾸면 해당 월 1일~말일로 맞춥니다. 기간은 위에서 직접 조정할 수 있습니다.
         </span>
       </div>
       <div v-if="isCombined" class="filters-special-sale">
         <SpecialSalePanel
+          :scope="props.scope"
+          :month-key="specialSaleMonthKey"
+          @saved="syncDashboardKpiSnapshot"
+        />
+        <ManualExpensePanel
           :scope="props.scope"
           :month-key="specialSaleMonthKey"
           @saved="syncDashboardKpiSnapshot"
@@ -787,9 +999,27 @@ const monthlyYearOptions = computed(() => {
   <CollapsibleSection
     v-if="isCoupang1pScope"
     title="쿠팡 1P 로켓 · 상품·발주 입력"
-    subtitle="발주 직접 기입 — 베스트하임 쿠팡 매출 KPI·엑셀에 반영"
+    subtitle="브랜드별 상품 리스트·발주 내역 — 대시보드 KPI·엑셀에 반영"
   >
-    <Coupang1pRocketPanel :scope="scope" :filter-ctx="manualFilterCtx" />
+    <nav class="inner-tabs brand-tabs" role="tablist" aria-label="쿠팡 1P 브랜드">
+      <button
+        v-for="b in COUPANG_1P_ROCKET_BRANDS"
+        :key="b.key"
+        type="button"
+        class="inner-tab"
+        :class="{ active: coupang1pBrandKey === b.key }"
+        role="tab"
+        :aria-selected="coupang1pBrandKey === b.key"
+        @click="coupang1pBrandKey = b.key"
+      >
+        {{ b.tabLabel }}
+      </button>
+    </nav>
+    <p class="standard-ref brand-panel-hint">
+      <strong>{{ COUPANG_1P_ROCKET_BRANDS.find((b) => b.key === coupang1pBrandKey)?.tabLabel }}</strong>
+      전용 상품·발주만 표시합니다.
+    </p>
+    <Coupang1pRocketPanel :brand-key="coupang1pBrandKey" :filter-ctx="manualFilterCtx" />
   </CollapsibleSection>
 
   <CollapsibleSection
@@ -815,15 +1045,13 @@ const monthlyYearOptions = computed(() => {
       <button
         type="button"
         class="btn btn-success btn-sm"
-        :disabled="saving || !canDownloadDashboard || combinedSegmentsLoading"
+        :disabled="saving || !canDownloadDashboard"
         @click="downloadDashboardExport"
       >
         {{
           saving
             ? '엑셀 생성 중…'
-            : combinedSegmentsLoading
-              ? '상세 로드 중…'
-              : '대시보드 엑셀 다운로드'
+            : '대시보드 엑셀 다운로드'
         }}
       </button>
     </template>
@@ -846,8 +1074,11 @@ const monthlyYearOptions = computed(() => {
       :manual-filter-ctx="dashboardKpiFilterCtx"
       :server-kpi-bucket="usesServerKpiMode ? serverKpiBucket : null"
       :server-platform-kpi-rows="usesServerKpiMode ? serverPlatformKpiRows : []"
+      :server-prev-month-platform-kpi-rows="usesServerKpiMode ? serverPrevMonthPlatformKpiRows : []"
       :server-day-over-day-rows="usesServerKpiMode ? serverDayOverDayRows : []"
       :segments-loading="combinedSegmentsLoading"
+      :kpi-loading="dashboardKpiLoading"
+      :kpi-error="dashboardKpiError"
       :hidden-kpi-keys="
         isPowerPriceScope
           ? POWER_PRICE_HIDDEN_KPI_KEYS
@@ -871,18 +1102,18 @@ const monthlyYearOptions = computed(() => {
       <button
         type="button"
         class="btn btn-outline btn-sm"
-        :disabled="!hasTableRowsHint || detailCacheLoading"
+        :disabled="!hasTableRowsHint || tableLoading || saving"
         @click="downloadCurrentTableExport"
       >
         현재 표 엑셀 다운로드
       </button>
     </template>
-    <p v-if="usesServerKpiMode && detailCacheLoading" class="standard-ref detail-cache-status">
+    <p v-if="tableLoading" class="standard-ref detail-cache-status">
       상세 데이터를 불러오는 중입니다.
     </p>
-    <p v-else-if="usesServerKpiMode && detailCacheError" class="error-msg detail-cache-status">
-      상세 데이터 로드 실패: {{ detailCacheError }}
-      <button type="button" class="btn btn-outline btn-sm" @click="retryDetailCacheLoad">
+    <p v-else-if="error && isPagedTableTab && !displaySortedFilteredRecords.length" class="error-msg detail-cache-status">
+      상세 데이터 로드 실패: {{ error }}
+      <button type="button" class="btn btn-outline btn-sm" @click="retryTableLoad">
         다시 시도
       </button>
     </p>
@@ -935,26 +1166,35 @@ const monthlyYearOptions = computed(() => {
     >
       에쎄르 형식: <strong>매출·순이익·광고</strong> 컬럼 포함. 표가 넓으면 <strong>가로 스크롤</strong>하세요.
       판매방식이 비면 네이버 빅셀 파일을 <strong>다시 업로드</strong>하세요. 엑셀 <strong>배송구분</strong> 열(일반배송·N배송)이 반영됩니다.
+      <strong>출처</strong>에서 수기작성·기타 판매처를 구분합니다.
       <span class="ui-build-tag">빌드 {{ UI_BUILD_ID }}</span>
     </p>
     <div class="stats">
       <span>
-        표시 <strong>{{ sortedFilteredRecords.length }}</strong> / 전체
-        <strong>{{ recordsForActiveTab.length }}</strong>건 · 컬럼 {{ columns.length }}개
+        표시 <strong>{{ displaySortedFilteredRecords.length }}</strong> / 전체
+        <strong>{{ tableTotalCount }}</strong>건 · 컬럼 {{ columns.length }}개
         <span v-if="activeTab === 'detail'" class="type-counts">
-          · 판매 <strong>{{ scopedSaleDetails.length }}</strong>건
+          · 판매 <strong>{{ tableSaleTotal }}</strong>건
         </span>
         <span v-else-if="activeTab === 'returns'" class="type-counts">
-          · 반품 <strong class="return-count">{{ scopedReturnDetails.length }}</strong>건
+          · 반품 <strong class="return-count">{{ tableReturnTotal }}</strong>건
         </span>
         <span v-if="periodSummary" class="period-summary">{{ periodSummary }}</span>
       </span>
     </div>
 
-    <div v-if="loading" class="empty">불러오는 중…</div>
-    <div v-else-if="!sortedFilteredRecords.length" class="empty">{{ tableEmptyHint }}</div>
-    <div v-else class="table-wrap table-wrap-tall sales-table-shell">
-      <VirtualScrollTableBody :rows="sortedFilteredRecords" class="data-table-wide sales-detail-table">
+    <div v-if="tableLoading || (loading && isPagedTableTab)" class="empty">불러오는 중…</div>
+    <div v-else-if="!displaySortedFilteredRecords.length" class="empty">{{ tableEmptyHint }}</div>
+    <div
+      v-else
+      class="table-wrap table-wrap-tall sales-table-shell"
+      :class="{ 'uses-virtual-scroll': useVirtualTable }"
+    >
+      <VirtualScrollTableBody
+        :rows="displaySortedFilteredRecords"
+        :threshold="tableVirtualThreshold"
+        class="data-table-wide sales-detail-table"
+      >
         <template #head>
           <tr>
             <th
@@ -964,7 +1204,7 @@ const monthlyYearOptions = computed(() => {
             >
               {{ col.label }}
             </th>
-            <th v-if="!isManualInputScope" class="col-actions">관리</th>
+            <th v-if="!isManualInputScope && isLineItemTableTab" class="col-actions">관리</th>
           </tr>
         </template>
         <template #row="{ row }">
@@ -975,7 +1215,7 @@ const monthlyYearOptions = computed(() => {
               :class="tdClass(col.key, row)"
             >
               <span
-                v-if="col.key === 'platform' || col.key === 'salesMethod'"
+                v-if="col.key === 'platform' || col.key === 'salesMethod' || col.key === 'dataSourceLabel'"
                 class="cell-pill"
                 :class="pillClass(col.key, row)"
               >
@@ -985,7 +1225,7 @@ const monthlyYearOptions = computed(() => {
                 {{ formatCellValue(col.key, resolveDetailField(row, col.key), row) }}
               </template>
             </td>
-            <td v-if="!isManualInputScope" class="col-actions">
+            <td v-if="!isManualInputScope && isLineItemTableTab" class="col-actions">
               <button type="button" class="btn btn-outline btn-sm" @click="openEdit(row)">수정</button>
               <button type="button" class="btn btn-outline btn-sm danger-text" @click="onDelete(row)">
                 삭제
@@ -994,6 +1234,46 @@ const monthlyYearOptions = computed(() => {
           </tr>
         </template>
       </VirtualScrollTableBody>
+    </div>
+    <div
+      v-if="isPagedTableTab && tablePagination.totalPages > 1"
+      class="table-pager"
+    >
+      <button
+        type="button"
+        class="btn btn-outline btn-sm"
+        :disabled="tablePagination.page <= 1 || tableLoading"
+        @click="goTablePage(1)"
+      >
+        처음
+      </button>
+      <button
+        type="button"
+        class="btn btn-outline btn-sm"
+        :disabled="tablePagination.page <= 1 || tableLoading"
+        @click="goTablePage(tablePagination.page - 1)"
+      >
+        이전
+      </button>
+      <span class="table-pager-status">
+        {{ tablePagination.page }} / {{ tablePagination.totalPages }} 페이지
+      </span>
+      <button
+        type="button"
+        class="btn btn-outline btn-sm"
+        :disabled="tablePagination.page >= tablePagination.totalPages || tableLoading"
+        @click="goTablePage(tablePagination.page + 1)"
+      >
+        다음
+      </button>
+      <button
+        type="button"
+        class="btn btn-outline btn-sm"
+        :disabled="tablePagination.page >= tablePagination.totalPages || tableLoading"
+        @click="goTablePage(tablePagination.totalPages)"
+      >
+        마지막
+      </button>
     </div>
     <p v-if="error" class="error-msg">{{ error }}</p>
     <p v-if="success" class="success-msg">{{ success }}</p>
@@ -1123,6 +1403,9 @@ const monthlyYearOptions = computed(() => {
 .filters-special-sale {
   padding-top: 4px;
   border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
 }
 
 .month-only-hint {
@@ -1305,7 +1588,12 @@ const monthlyYearOptions = computed(() => {
 }
 
 .table-wrap-tall {
-  max-height: 520px;
+  max-height: min(70vh, 640px);
+  overscroll-behavior: contain;
+}
+
+.sales-table-shell.uses-virtual-scroll {
+  overflow: hidden;
 }
 
 .table-hint {
@@ -1335,6 +1623,11 @@ const monthlyYearOptions = computed(() => {
 
 .data-table-wide {
   min-width: max-content;
+}
+
+.sales-table-shell :deep(.virtual-scroll-host:not(.is-virtual)) {
+  max-height: none;
+  overflow: visible;
 }
 
 .sales-table-shell :deep(.virtual-inner-table) {
@@ -1455,6 +1748,18 @@ const monthlyYearOptions = computed(() => {
   border-color: #cbd5e1;
 }
 
+.pill-manual {
+  color: #9a3412;
+  background: #ffedd5;
+  border-color: #fdba74;
+}
+
+.pill-other {
+  color: #6b21a8;
+  background: #f3e8ff;
+  border-color: #d8b4fe;
+}
+
 .col-actions {
   white-space: nowrap;
 }
@@ -1479,4 +1784,20 @@ const monthlyYearOptions = computed(() => {
   margin-top: 12px;
   font-size: 0.875rem;
 }
+
+.table-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.table-pager-status {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  min-width: 7.5rem;
+  text-align: center;
+}
+
 </style>

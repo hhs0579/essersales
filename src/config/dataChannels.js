@@ -184,40 +184,6 @@ export const DATA_CHANNELS = [
   },
 
   {
-
-    id: 'channel_d',
-
-    tabLabel: '쿠팡 1P 로켓',
-
-    reportTitle: '쿠팡 1P 로켓 발주',
-
-    description:
-
-      '쿠팡 1P 로켓배송 발주를 직접 입력합니다. 공급매출·매입원가가 베스트하임 쿠팡 매출 KPI에 반영됩니다.',
-
-    manualOnly: true,
-
-    esserDashboard: true,
-
-    modes: [
-
-      {
-
-        id: 'daily',
-
-        label: '직접 입력',
-
-        scope: 'coupang_1p_rocket',
-
-        uploadKind: 'coupang_1p_rocket_manual',
-
-      },
-
-    ],
-
-  },
-
-  {
     id: 'channel_e',
     tabLabel: '기타 판매처',
     reportTitle: '특판 · 폐쇄몰',
@@ -231,6 +197,25 @@ export const DATA_CHANNELS = [
         label: '특판/폐쇄몰',
         scope: 'other_sellers',
         uploadKind: 'bestheim_closed_mall',
+      },
+    ],
+  },
+
+  {
+    id: 'channel_d',
+    tabLabel: '쿠팡 1P 로켓',
+    reportTitle: '쿠팡 1P 로켓 발주',
+    description:
+      '베스트하임·에쎄르 쿠팡 1P 로켓 발주를 브랜드별로 직접 입력합니다. 상품 리스트·발주 내역은 브랜드마다 따로 저장됩니다.',
+    manualOnly: true,
+    coupang1pRocketChannel: true,
+    esserDashboard: true,
+    modes: [
+      {
+        id: 'daily',
+        label: '직접 입력',
+        scope: 'coupang_1p_rocket',
+        uploadKind: 'coupang_1p_rocket_manual',
       },
     ],
   },
@@ -280,16 +265,13 @@ export function getChannel(channelId) {
 /** 매출 대시보드 탭 순서 */
 export function getDashboardChannels() {
   const power = DATA_CHANNELS.find((c) => c.id === 'channel_c')
-  const coupang1p = DATA_CHANNELS.find((c) => c.id === 'channel_d')
   const otherSellers = DATA_CHANNELS.find((c) => c.id === 'channel_e')
   return [
     DATA_CHANNELS.find((c) => c.id === 'channel_a'),
     DATA_CHANNELS.find((c) => c.id === 'channel_b'),
     power,
-    coupang1p,
     otherSellers,
     COMBINED_CHANNEL,
-    COMBINED_COMMENTS_CHANNEL,
   ].filter(Boolean)
 }
 
@@ -405,7 +387,13 @@ export function uploadKindsForScope(scope) {
     return uploadKindsForScope(dailyScopeForMonthly(scope))
   }
 
-  if (scope === 'platform') return ['platform_daily']
+  if (scope === 'platform') {
+    return ['platform_daily', 'platform_period', 'platform_monthly', 'sales_report', '']
+  }
+
+  if (scope === 'company_b' || scope === 'company_b_monthly') {
+    return ['sales_daily_b', 'sales_period_b', 'sales_monthly_b']
+  }
 
   if (scope === 'other_sellers') return ['esser_closed_mall', 'bestheim_closed_mall']
 
@@ -461,6 +449,9 @@ export function channelLabelForUploadKind(uploadKind) {
   if (uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall') {
     return '기타 판매처'
   }
+  if (uploadKind === 'coupang_1p_rocket_manual') {
+    return '쿠팡 1P 로켓'
+  }
 
   for (const ch of DATA_CHANNELS) {
 
@@ -482,6 +473,11 @@ export function isChannelUploadKind(kind) {
 /** @param {string} channelId */
 export function isClosedMallChannel(channelId) {
   return getChannel(channelId)?.closedMallChannel === true
+}
+
+/** @param {string} channelId */
+export function isCoupang1pRocketChannel(channelId) {
+  return getChannel(channelId)?.coupang1pRocketChannel === true
 }
 
 /** @param {string} scope */
@@ -514,11 +510,8 @@ export function isPowerPriceScope(scope) {
 
 
 /** @param {string} scope */
-
 export function isCoupang1pRocketScope(scope) {
-
   return scope === 'coupang_1p_rocket'
-
 }
 
 

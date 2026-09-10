@@ -6,6 +6,8 @@ const props = defineProps({
   /** YYYY-MM-DD (보통 YYYY-MM-01) */
   modelValue: { type: String, default: '' },
   suggestDate: { type: String, default: '' },
+  /** suggestDate를 빈 행에 자동 저장 */
+  autoApplySuggest: { type: Boolean, default: true },
   minYear: { type: Number, default: 2020 },
   maxDate: { type: String, default: '' },
 })
@@ -65,16 +67,30 @@ function syncFromSource(src) {
   month.value = p.m
 }
 
+function applySuggestIfEmpty() {
+  const suggest = String(props.suggestDate || '').trim()
+  if (!props.autoApplySuggest || props.modelValue || !/^\d{4}-\d{2}/.test(suggest)) {
+    return false
+  }
+  const p = parseYmFromYmd(suggest)
+  if (!p.y || !p.m) return false
+  const ymd = `${p.y}-${p.m}-01`
+  syncFromSource(ymd)
+  emit('update:modelValue', ymd)
+  return true
+}
+
 watch(
-  () => props.modelValue,
-  (v) => {
+  () => [props.modelValue, props.suggestDate, props.autoApplySuggest],
+  ([v]) => {
     if (v) {
       syncFromSource(v)
       return
     }
-    // 빈 값에 suggestDate를 보여 주면 실제 저장값과 UI가 어긋남 (필터 시작월 오인)
-    year.value = ''
-    month.value = ''
+    if (!applySuggestIfEmpty()) {
+      year.value = ''
+      month.value = ''
+    }
   },
   { immediate: true },
 )

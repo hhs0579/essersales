@@ -5,14 +5,14 @@ import { hydrateCoupang1pRocketStore } from './useCoupang1pRocket.js'
 import { hydrateOwnMallManualStore } from './useOwnMallManual.js'
 import { hydrateProfitLossTemplate } from './useProfitLossTemplate.js'
 import { hydrateSpecialSaleForScope } from './useSpecialSale.js'
-import { hydrateCombinedCommentsForScope } from './useCombinedComments.js'
+import { hydrateManualExpenseForScope } from './useManualExpense.js'
 
 /** @type {Promise<void> | null} */
 let hydratePromise = null
 let hydrateCompleted = false
 
 /**
- * 서버 DB에서 파워프라이스·외부 광고·통합 코멘트 등 불러오기 (다른 PC와 공유)
+ * 서버 DB에서 파워프라이스·외부 광고 등 불러오기 (다른 PC와 공유)
  * @param {{ forceRefresh?: boolean }} [opts]
  */
 export async function hydrateAppSettings(opts = {}) {
@@ -31,7 +31,8 @@ export async function hydrateAppSettings(opts = {}) {
       hydrateProfitLossTemplate({ forceRefresh }),
       hydrateSpecialSaleForScope('combined_daily', { forceRefresh }),
       hydrateSpecialSaleForScope('combined_monthly', { forceRefresh }),
-      hydrateCombinedCommentsForScope('combined_comments', { forceRefresh }),
+      hydrateManualExpenseForScope('combined_daily', { forceRefresh }),
+      hydrateManualExpenseForScope('combined_monthly', { forceRefresh }),
       ...[...manualScopes].map((scope) => hydrateManualAdForScope(scope, { forceRefresh })),
     ]
     await Promise.allSettled(tasks)

@@ -68,18 +68,23 @@ export function mapSalesRecordBackfill(data, upload = null) {
       : null
   const orderDate = toIsoDate(dateRaw) || uploadDateInfo?.singleDate || null
 
+  const uploadKind = coalesceStr(data.uploadKind, upload?.upload_kind)
+  const isClosedMall =
+    uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall'
+
   let periodFrom = upload?.period_from || uploadDateInfo?.periodFrom || null
   let periodTo = upload?.period_to || uploadDateInfo?.periodTo || null
   if (!periodFrom && orderDate) {
     periodFrom = orderDate
     periodTo = orderDate
   }
+  // 특판: 행마다 하루 — 업로드 min~max period로 KPI·일별 필터가 월 통합되는 것 방지
+  if (isClosedMall && orderDate) {
+    periodFrom = orderDate
+    periodTo = orderDate
+  }
 
   const businessDate = orderDate || periodFrom || upload?.business_date || null
-
-  const uploadKind = coalesceStr(data.uploadKind, upload?.upload_kind)
-  const isClosedMall =
-    uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall'
 
   return {
     order_date: orderDate,

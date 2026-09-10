@@ -2,8 +2,12 @@
 import { ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import { parsePlatformPeriodInWorker } from '../utils/parseExcelInWorker.js'
 import { savePlatformPeriodUpload } from '../services/salesApi.js'
+import {
+  detectPlatformFromFileName,
+  resolveUploadPlatform,
+} from '../utils/platformDetect.js'
+import { formatPlatformUploadSuccess } from '../utils/uploadSuccessMessage.js'
 
 const props = defineProps({
   /** DB uploads.upload_kind — 채널별 분리 (platform_period | sales_period_b) */
@@ -35,53 +39,33 @@ async function onFilesSelected(fileList) {
     let total = 0
     for (const [idx, file] of fileList.entries()) {
       const filePrefix = fileList.length > 1 ? `[${idx + 1}/${fileList.length}] ` : ''
-      progressMessage.value = `${filePrefix}엑셀 파일 파싱 및 포맷 검증 중...`
+      const fileName = file.name
+      progressMessage.value = `${filePrefix}파일 선택 완료 (${fileName})`
       await yieldTick()
 
-      const {
-        fileName,
-        platform: p,
-        businessDate,
-        periodFrom,
-        periodTo,
-        periodLabel,
-        details,
-        skipped,
-        skippedSummary = 0,
-        format,
-        salesMethod,
-        dateRangeHint,
-      } = await parsePlatformPeriodInWorker(file, platform.value)
+      const fromName = detectPlatformFromFileName(fileName)
+      if (fromName) platform.value = fromName
+      const resolvedPlatform = resolveUploadPlatform(fileName, platform.value, [])
 
-      if (!details.length) {
-        throw new Error(
-          `「${fileName}」에서 저장할 행을 찾지 못했습니다. 파일명에 기간(예: _20260501_20260601)이 있는지, 상품·매출 데이터가 있는지 확인하세요.`,
-        )
-      }
-
-      progressMessage.value = `${filePrefix}서버 DB에 기간 데이터 저장 중...`
+      progressMessage.value = `${filePrefix}업로드 중...`
       await yieldTick()
+      progressMessage.value = `${filePrefix}서버 처리 중...`
 
-      const { count } = await savePlatformPeriodUpload({
+      const { count, parseMeta, salesMethod, platform: savedPlatform } = await savePlatformPeriodUpload({
         file,
         fileName,
-        platform: p,
-        businessDate,
-        periodFrom,
-        periodTo,
-        details,
-        salesMethod: salesMethod || '',
+        platform: resolvedPlatform,
         uploadKind: props.uploadKind,
       })
       total += count
-      const skipParts = []
-      if (skipped > 0) skipParts.push(`미저장 ${skipped}행`)
-      if (skippedSummary > 0) skipParts.push(`합계행 제외 ${skippedSummary}`)
-      const skipNote = skipParts.length ? ` (${skipParts.join(', ')})` : ''
-      const formatLabel = format === 'coupang_esser_period' ? ' · 빅셀 매출분석(기간)' : ''
-      const methodLabel = salesMethod ? ` · ${salesMethod}` : ''
-      const rangeLabel = dateRangeHint || periodLabel || ''
-      success.value = `${fileList.length}개 파일 · ${platform.value}${formatLabel}${methodLabel} · 기간 ${rangeLabel} · 총 ${total}건 저장${skipNote}`
+      success.value = formatPlatformUploadSuccess({
+        fileCount: fileList.length,
+        platform: savedPlatform || parseMeta?.platform || resolvedPlatform,
+        parseMeta,
+        total,
+        kind: 'period',
+        salesMethod,
+      })
     }
     emit('uploaded')
   } catch (e) {

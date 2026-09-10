@@ -1,10 +1,11 @@
-import { ref, computed, unref } from 'vue'
+import { ref, computed, unref, watch } from 'vue'
 import {
   RECORD_TYPES,
   resolveDetailColumns,
   sanitizeDetailColumns,
   resolveSummaryColumns,
   isEsserDetailRow,
+  SERVER_PAGED_TABLE_TABS,
 } from '../constants/salesColumns'
 import { WEEKDAY_LABELS } from '../utils/dateParse.js'
 import {
@@ -26,6 +27,8 @@ import { sortRecordsForTab } from '../utils/recordSort.js'
 import {
   saveSalesReportUpload,
   fetchSalesRecords,
+  fetchSalesRecordsPage,
+  fetchRecordsByUploadIds,
   fetchUploads,
   updateSalesRecord,
   deleteSalesRecord,
@@ -33,14 +36,17 @@ import {
   fetchKpiSummary,
   fetchKpiDaily,
   fetchKpiByPlatform,
+  fetchKpiBySegment,
   fetchKpiCompareYesterday,
 } from '../services/salesApi.js'
+import { pgDownloadTableExport } from '../services/apiClient.js'
 import { downloadMergedSalesReport, mergedFileName, dateRangeLabel } from '../utils/salesReportExporter.js'
 import { FEATURES } from '../config/features.js'
 import {
   allDataScopes,
   getChannel,
   getChannelByScope,
+  getDashboardChannels,
   getMode,
   uploadKindsForScope,
   uploadKindsForChannel,
@@ -53,6 +59,8 @@ import {
   isMonthlyScope,
   dailyScopeForMonthly,
   isCombinedScope,
+  isManualOnlyChannel,
+  isCombinedCommentsChannel,
 } from '../config/dataChannels.js'
 import {
   EXTERNAL_AD_CHANNELS,
@@ -61,15 +69,16 @@ import {
 } from '../config/externalAdChannels.js'
 import { INTEGRATED_REPORT_LAYOUT_VER } from '../utils/profitLossReportExporter.js'
 import { UI_BUILD_ID } from '../constants/appVersion.js'
-import { getSpecialSaleSnapshot, hydrateSpecialSaleForScope, getSpecialSaleMonthlyMap } from '../composables/useSpecialSale.js'
+import { getSpecialSaleSnapshot, getSpecialSaleMonthlyMap, getSpecialSaleReactiveStore, getSpecialSaleSettingPayload } from '../composables/useSpecialSale.js'
 import {
+  getManualExpenseSnapshot,
+  getManualExpenseSettingPayload,
+} from '../composables/useManualExpense.js'
+import {
+  addMonthsToMonthKey,
   buildSpecialSaleMonthlyTotals,
   resolveReferenceMonthKey,
 } from '../utils/dayOverDaySales.js'
-import {
-  getCombinedCommentsSnapshot,
-  hydrateCombinedCommentsForScope,
-} from '../composables/useCombinedComments.js'
 import { getManualAdSnapshot, hydrateManualAdForScope } from '../composables/useManualAdSpend.js'
 import { getPowerPriceDetailRecords, powerPriceDetailRecords } from '../composables/usePowerPrice.js'
 import { coupang1pRocketDetailRecords } from '../composables/useCoupang1pRocket.js'
@@ -113,6 +122,10 @@ import {
   mergeOwnMallIntoServerKpiBucket,
   mergeOwnMallManualIntoDailyBuckets,
   buildOwnMallPlatformRow,
+  mergeOwnMallIntoCombinedSegmentRows,
+  mergeSpecialSaleIntoCombinedSegmentRows,
+  mergeManualExpenseIntoCombinedSegmentRows,
+  buildOwnMallKpiFilterCtx,
 } from '../services/adapters/ownMallKpiMerge.js'
 import {
   shouldMergePowerPriceKpi,
@@ -122,10 +135,16 @@ import {
 import {
   shouldMergeCoupang1pKpi,
   buildCoupang1pPlatformRow,
-  mergeCoupang1pIntoServerPlatformRows,
   mergeCoupang1pIntoServerKpiBucket,
   mergeCoupang1pIntoDailyBuckets,
+  mergeCoupang1pIntoServerPlatformRows,
+  mergeCoupang1pIntoCombinedSegmentRows,
+  filterCoupang1pRecordsByBrand,
 } from '../services/adapters/coupang1pKpiMerge.js'
+import {
+  reshapeBestheimKpiRowsToCombined구분,
+  esserBucketFromPlatformKpiRow,
+} from '../utils/platformKpiSplit.js'
 import { isPgExportMode, pgDownloadIntegratedExport, triggerBlobDownload } from '../services/exportApi.js'
 import {
   buildKpiQueryFromFilters,
@@ -134,7 +153,9 @@ import {
 } from '../services/adapters/kpiAdapter.js'
 import {
   adaptServerPlatformKpiRows,
+  adaptServerSegmentKpiRows,
   adaptServerDayOverDayRows,
+  buildFallbackPlatformRowsFromSummary,
 } from '../services/adapters/platformKpiAdapter.js'
 import { createTtlCache } from '../utils/ttlCache.js'
 
@@ -156,6 +177,7 @@ function buildServerKpiCacheKey(scope, query) {
     query.from || '',
     query.to || '',
     query.date || '',
+    query.month || '',
     query.platform || '',
     query.sales_method || '',
     query.store_name || '',
@@ -187,6 +209,8 @@ const dailyCacheLoaded = ref(false)
 const channelCacheLoaded = ref(false)
 const productCacheLoaded = ref(false)
 const productOptionCacheLoaded = ref(false)
+const TABLE_PAGE_LIMIT = 100
+
 const detailRecords = ref([])
 const dailyRecords = ref([])
 const channelRecords = ref([])
@@ -225,9 +249,16 @@ function createScopeSlice() {
     chartMetric: ref('revenue'),
     selectedUploadIds: ref([]),
     records: ref([]),
+    tablePageRecords: ref([]),
+    tablePagination: ref({ page: 1, limit: TABLE_PAGE_LIMIT, total: 0, totalPages: 0 }),
+    tableSaleTotal: ref(0),
+    tableReturnTotal: ref(0),
+    tableLoading: ref(false),
     serverKpiBucket: ref(null),
     serverDailyChartBuckets: ref([]),
     serverPlatformKpiRows: ref([]),
+    /** 통합 월별 전월대비 — 전월 by-segment (특판 merge 후) */
+    serverPrevMonthPlatformKpiRows: ref([]),
     serverDayOverDayRows: ref([]),
     serverKpiLoaded: ref(false),
   }
@@ -269,7 +300,12 @@ export function filterByScope(list, scope) {
 
 function dataSourceLabelForRow(row) {
   if (isPowerPriceRecord(row)) return POWER_PRICE_DATA_SOURCE_LABEL
-  if (isCoupang1pRocketRecord(row)) return '베스트하임'
+  if (isCoupang1pRocketRecord(row)) {
+    const tagged = String(row.dataSourceLabel || '').trim()
+    if (tagged) return tagged
+    if (row.coupang1pBrandKey === 'esser' || row.brand === '에쎄르') return '사본느리'
+    return '베스트하임'
+  }
   if (recordMatchesScope(row, 'platform') || recordMatchesScope(row, 'platform_monthly')) {
     return '베스트하임'
   }
@@ -288,12 +324,22 @@ function mergePowerPriceForCombined(list, scope) {
   return [...list, ...ppRows]
 }
 
-/** 쿠팡 1P 로켓 발주 — 베스트하임·통합 쿠팡 KPI 반영 */
+/** 쿠팡 1P 로켓 발주 — 베스트하임(platform)·사본느리(company_b)·통합 KPI 반영 */
 function mergeCoupang1pRocketForScope(list, scope) {
-  if (scope !== 'platform' && scope !== 'platform_monthly' && !isCombinedScope(scope)) return list
-  const rows = coupang1pRocketDetailRecords.value
-  if (!rows.length) return list
-  return [...list, ...rows]
+  const all = coupang1pRocketDetailRecords.value
+  if (!all.length) return list
+  if (isCombinedScope(scope)) return [...list, ...all]
+  if (scope === 'platform' || scope === 'platform_monthly') {
+    const rows = filterCoupang1pRecordsByBrand(all, 'bestheim')
+    if (!rows.length) return list
+    return [...list, ...rows]
+  }
+  if (scope === 'company_b' || scope === 'company_b_monthly') {
+    const rows = filterCoupang1pRecordsByBrand(all, 'esser')
+    if (!rows.length) return list
+    return [...list, ...rows]
+  }
+  return list
 }
 
 /** 사본느리 자사몰 직접입력 — company_b·통합 KPI 반영 */
@@ -424,37 +470,39 @@ function detailsForSummaryAggregation(scope, slice) {
   return [...filteredSales, ...filteredTotals]
 }
 
+function normalizeLoadedDetailRow(row, uploadById) {
+  const upload = uploadById.get(row.uploadId)
+  const normalized = normalizeEsserDetailFields(row)
+  const platform = normalizePlatformLabel(
+    resolveRecordPlatform(normalized, upload?.platform),
+  )
+  const delivery =
+    normalized.deliveryMethod ||
+    normalized.delivery_method ||
+    normalized['배송구분'] ||
+    ''
+  const salesMethod = getSalesMethod({
+    ...normalized,
+    platform,
+    deliveryMethod: delivery,
+  })
+  const {
+    channelKind: _ck,
+    channel_kind: _ck2,
+    배송구분: _bg,
+    importUnitCost: _iuc,
+    import_unit_cost: _iuc2,
+    ...rest
+  } = normalized
+  return { ...rest, platform, channel: platform, salesMethod, deliveryMethod: delivery }
+}
+
 async function loadDetailCache() {
   // 통합 세그먼트 KPI는 data JSONB 필드(원가·특판·시트총합 등)가 필요.
   // lean은 필드를 빼 이전화면과 숫자가 달라지므로 full 유지.
   const fetched = await fetchSalesRecords('detail', { includeData: 'full' })
   const uploadById = new Map(uploads.value.map((u) => [u.id, u]))
-  detailRecords.value = fetched.map((row) => {
-    const upload = uploadById.get(row.uploadId)
-    const normalized = normalizeEsserDetailFields(row)
-    const platform = normalizePlatformLabel(
-      resolveRecordPlatform(normalized, upload?.platform),
-    )
-    let delivery =
-      normalized.deliveryMethod ||
-      normalized.delivery_method ||
-      normalized['배송구분'] ||
-      ''
-    const salesMethod = getSalesMethod({
-      ...normalized,
-      platform,
-      deliveryMethod: delivery,
-    })
-    const {
-      channelKind: _ck,
-      channel_kind: _ck2,
-      배송구분: _bg,
-      importUnitCost: _iuc,
-      import_unit_cost: _iuc2,
-      ...rest
-    } = normalized
-    return { ...rest, platform, channel: platform, salesMethod, deliveryMethod: delivery }
-  })
+  detailRecords.value = fetched.map((row) => normalizeLoadedDetailRow(row, uploadById))
 }
 
 async function loadDailyCache() {
@@ -489,49 +537,171 @@ async function loadProductOptionCache() {
   }
 }
 
+function buildTableListQuery(scope, slice, { page, tab } = {}) {
+  const f = slice.filters.value
+  const activeTab = tab || slice.activeTab.value
+  const recordType =
+    activeTab === 'returns' || activeTab === 'detail' || SERVER_PAGED_TABLE_TABS.has(activeTab)
+      ? 'detail'
+      : activeTab
+  const pageNo = Number(page) || slice.tablePagination.value.page || 1
+  const q = {
+    page: pageNo,
+    limit: TABLE_PAGE_LIMIT,
+    scope,
+    includeData: 'full',
+    view: 'table',
+    tab: activeTab,
+    sort:
+      activeTab === 'detail' || activeTab === 'returns' || activeTab === 'daily'
+        ? 'order_date'
+        : 'sales',
+    order:
+      activeTab === 'detail' || activeTab === 'returns' || activeTab === 'daily'
+        ? 'asc'
+        : 'desc',
+    start_date: f.dateFrom || '',
+    end_date: f.dateTo || '',
+    platform: f.platform || '',
+    sales_method: f.salesMethod || '',
+    brand: f.brand || '',
+    channel: f.channel || '',
+    product_name: f.productName || '',
+    option: f.option || '',
+    date: f.date || '',
+    year: f.year || '',
+    month: f.month || '',
+    day_of_week:
+      f.dayOfWeek !== '' && f.dayOfWeek != null ? String(f.dayOfWeek) : '',
+  }
+  if (activeTab === 'detail') q.row_kind = 'sale'
+  if (activeTab === 'returns') q.row_kind = 'return'
+  const ids = slice.selectedUploadIds.value
+  if (ids.length) q.upload_ids = ids.join(',')
+  return { recordType, q, activeTab }
+}
+
+function mergeManualsIntoTablePage(pageItems, scope, tab, filters) {
+  let extra = []
+  extra = mergeCoupang1pRocketForScope(extra, scope)
+  extra = mergeOwnMallManualForScope(extra, scope)
+  extra = mergePowerPriceForCombined(extra, scope)
+  extra = applyRecordFilters(extra, tab === 'returns' ? 'returns' : 'detail', {
+    year: filters.year,
+    month: filters.month,
+    dayOfWeek: filters.dayOfWeek,
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    date: filters.date,
+    platform: filters.platform,
+    salesMethod: filters.salesMethod,
+    channel: filters.channel,
+    brand: filters.brand,
+    productName: filters.productName,
+    option: filters.option,
+  })
+  extra =
+    tab === 'returns'
+      ? extra.filter((r) => isReturnRecord(r))
+      : extra.filter((r) => !isReturnRecord(r) && !isEsserSheetTotalRecord(r))
+  if (!extra.length) return pageItems
+  return sortRecordsForTab([...extra, ...pageItems], tab)
+}
+
+function clientPaginate(list, page, limit) {
+  const total = list.length
+  const totalPages = Math.max(1, Math.ceil(total / limit) || 1)
+  const p = Math.min(Math.max(1, page), totalPages)
+  const start = (p - 1) * limit
+  return {
+    items: list.slice(start, start + limit),
+    pagination: { page: p, limit, total, totalPages },
+  }
+}
+
+async function loadTablePageForScope(scope, { page, silent = false } = {}) {
+  const slice = getSlice(scope)
+  const { recordType, q, activeTab } = buildTableListQuery(scope, slice, { page })
+  if (!silent) slice.tableLoading.value = true
+  try {
+    if (scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE) {
+      const local =
+        scope === POWER_PRICE_SCOPE
+          ? powerPriceDetailRecords.value
+          : coupang1pRocketDetailRecords.value
+      const filtered = applyRecordFilters(local, activeTab, slice.filters.value).filter((r) =>
+        activeTab === 'returns'
+          ? isReturnRecord(r)
+          : !isReturnRecord(r) && !isEsserSheetTotalRecord(r),
+      )
+      const sorted = sortRecordsForTab(filtered, activeTab)
+      const paged = clientPaginate(sorted, q.page, TABLE_PAGE_LIMIT)
+      slice.tablePageRecords.value = paged.items
+      slice.tablePagination.value = paged.pagination
+      slice.records.value = paged.items
+      if (activeTab === 'returns') slice.tableReturnTotal.value = paged.pagination.total
+      else slice.tableSaleTotal.value = paged.pagination.total
+      return
+    }
+
+    const res = await fetchSalesRecordsPage(recordType, q)
+    const uploadById = new Map(uploads.value.map((u) => [u.id, u]))
+    const items = (res.items || []).map((row) =>
+      activeTab === 'detail' || activeTab === 'returns'
+        ? normalizeLoadedDetailRow(row, uploadById)
+        : row,
+    )
+    slice.tablePageRecords.value = items
+    slice.tablePagination.value = res.pagination || {
+      page: q.page,
+      limit: TABLE_PAGE_LIMIT,
+      total: res.total || items.length,
+      totalPages: 1,
+    }
+    slice.records.value = items
+    if (activeTab === 'returns') {
+      slice.tableReturnTotal.value = res.pagination?.total || 0
+    } else if (activeTab === 'detail') {
+      slice.tableSaleTotal.value = res.pagination?.total || 0
+      slice.tableReturnTotal.value = res.pagination?.returnTotal || 0
+    }
+  } catch (e) {
+    slice.tablePageRecords.value = []
+    slice.records.value = []
+    if (!silent) error.value = `판매내역 불러오기 실패: ${e.message}`
+    throw e
+  } finally {
+    if (!silent) slice.tableLoading.value = false
+  }
+}
+
 async function loadRecordsForScope(scope, { silent = false } = {}) {
   const slice = getSlice(scope)
+  const tab = slice.activeTab.value
+
+  if (SERVER_PAGED_TABLE_TABS.has(tab)) {
+    await loadTablePageForScope(scope, { silent })
+    return
+  }
+
   if (!silent) {
     loading.value = true
     error.value = ''
   }
   try {
-    const tab = slice.activeTab.value
-
-    // detail 탭·집계 탭 모두: 이미 있는 detail 캐시로 처리 (전량 /records 재호출 금지)
-    if (tab === 'detail' || (scope !== 'sales_report' && detailCacheLoaded.value)) {
-      if (!detailCacheLoaded.value || detailCacheLoadedVersion !== detailCacheVersion) {
-        await ensureDetailCache()
-      }
-      const scopedDetails = applyUploadScope(
-        filterByScope(detailRecords.value, scope),
-        slice.selectedUploadIds,
-      )
-      if (tab === 'detail') {
-        // 화면 상세 표는 scopedDetailRecords(computed)가 detailRecords를 씀
-        slice.records.value = scopedDetails
-      } else if (scopedDetails.length) {
-        slice.records.value = buildSummaryTabFromDetails(tab, scopedDetails)
-      } else {
-        slice.records.value = []
-      }
-      return
-    }
-
-    const fetched = await fetchSalesRecords(tab)
-    const scopedFetched = filterByScope(fetched, scope)
-    slice.records.value = scopedFetched
-
-    const scopedDetails = applyUploadScope(
-      filterByScope(detailRecords.value, scope),
+    await ensureTabAggregateCache(tab)
+    const source =
+      tab === 'daily'
+        ? dailyRecords.value
+        : tab === 'channel'
+          ? channelRecords.value
+          : tab === 'product'
+            ? productRecords.value
+            : productOptionRecords.value
+    slice.records.value = applyUploadScope(
+      filterByScope(source, scope),
       slice.selectedUploadIds,
     )
-
-    if (scope !== 'sales_report' && scopedDetails.length) {
-      slice.records.value = buildSummaryTabFromDetails(tab, scopedDetails)
-    } else if (!scopedFetched.length && scopedDetails.length) {
-      slice.records.value = buildSummaryTabFromDetails(tab, scopedDetails)
-    }
   } catch (e) {
     if (!silent) error.value = `데이터 불러오기 실패: ${e.message}`
     slice.records.value = []
@@ -651,7 +821,6 @@ async function refreshAll() {
   productCacheLoaded.value = false
   productOptionCacheLoaded.value = false
   await Promise.all([
-    ensureDetailCache({ forceRefresh: true }),
     loadDailyCache(),
     loadChannelCache(),
     loadProductCache(),
@@ -661,46 +830,212 @@ async function refreshAll() {
   channelCacheLoaded.value = true
   productCacheLoaded.value = true
   productOptionCacheLoaded.value = true
-  const scopes = allDataScopes().filter((s) => s !== 'sales_report' || FEATURES.salesReport)
-  await Promise.all(scopes.map((s) => loadRecordsForScope(s)))
+  await reloadOpenTablePages()
 }
+
+async function reloadOpenTablePages() {
+  await Promise.all(
+    allDataScopes().map((s) => {
+      const sl = getSlice(s)
+      if (!sl.tablePageRecords.value.length && !(sl.tablePagination.value.total > 0)) {
+        return Promise.resolve()
+      }
+      return loadTablePageForScope(s, { silent: true }).catch(() => {})
+    }),
+  )
+}
+
+/** @type {Promise<void> | null} */
+let coreLoadPromise = null
 
 async function ensureCoreLoaded() {
+  if (initialized.value) return
+  if (coreLoadPromise) return coreLoadPromise
+  coreLoadPromise = (async () => {
+    try {
+      await loadUploads()
+    } catch {
+      /* error already set */
+    }
+    try {
+      await hydrateAppSettings()
+    } catch {
+      /* offline */
+    }
+    initialized.value = true
+  })()
   try {
-    await loadUploads()
-  } catch {
-    /* error already set */
+    await coreLoadPromise
+  } finally {
+    if (initialized.value) coreLoadPromise = null
   }
-  try {
-    await hydrateAppSettings()
-  } catch {
-    /* offline */
-  }
-  initialized.value = true
 }
 
-/**
- * 서버 KPI 응답을 slice에 반영 (+ 수기 merge)
- * @param {string} scope
- * @param {{ summary: unknown, daily: unknown, byPlatform: unknown, compareYesterday: unknown }} bundle
- */
-function applyServerKpiBundleToSlice(scope, bundle) {
+function sliceHasWarmServerKpi(scope) {
   const slice = getSlice(scope)
-  const { summary, daily, byPlatform, compareYesterday } = bundle
+  if (!slice.serverKpiLoaded.value) return false
+  return (
+    slice.serverKpiBucket.value != null ||
+    (slice.serverPlatformKpiRows.value?.length || 0) > 0 ||
+    (slice.serverDailyChartBuckets.value?.length || 0) > 0
+  )
+}
+
+function getServerKpiCacheBundle(scope) {
+  const slice = getSlice(scope)
+  const query = buildKpiQueryFromFilters(slice.filters.value, scope)
+  const cacheKey = buildServerKpiCacheKey(scope, query)
+  return { cacheKey, bundle: serverKpiResultCache.get(cacheKey) }
+}
+
+/** 대시보드 탭 KPI prefetch 대상 (직접입력·코멘트 제외) */
+function listPrefetchableKpiScopes() {
+  const scopes = []
+  for (const ch of getDashboardChannels()) {
+    if (!ch || isCombinedCommentsChannel(ch.id) || isManualOnlyChannel(ch.id)) continue
+    for (const mode of ch.modes || []) {
+      if (mode.id !== 'daily' && mode.id !== 'monthly') continue
+      if (mode.scope) scopes.push(mode.scope)
+    }
+  }
+  return [...new Set(scopes)]
+}
+
+const PREFETCH_CONCURRENCY = 1
+let prefetchRunning = false
+
+/**
+ * 현재 탭 KPI 이후 idle에 다른 scope KPI를 미리 채워 탭 전환 대기 제거
+ * @param {string} primaryScope
+ */
+function schedulePrefetchDashboardKpis(primaryScope) {
+  if (!isServerKpi()) return
+  const run = () => {
+    void runPrefetchDashboardKpis(primaryScope)
+  }
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(run, { timeout: 2500 })
+  } else {
+    setTimeout(run, 600)
+  }
+}
+
+async function runPrefetchDashboardKpis(primaryScope) {
+  if (prefetchRunning) return
+  prefetchRunning = true
+  try {
+    const queue = listPrefetchableKpiScopes().filter((scope) => {
+      if (scope === primaryScope) return false
+      if (scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE) return false
+      // 통합 by-segment는 설정 로드가 무거워 부팅 502를 유발 — 탭 진입 시 로드
+      if (isCombinedScope(scope)) return false
+      const { bundle } = getServerKpiCacheBundle(scope)
+      if (bundle) return false
+      if (sliceHasWarmServerKpi(scope)) return false
+      return true
+    })
+    if (!queue.length) return
+
+    let cursor = 0
+    async function worker() {
+      while (cursor < queue.length) {
+        const scope = queue[cursor]
+        cursor += 1
+        try {
+          await loadServerKpiForScope(scope)
+        } catch {
+          /* prefetch 실패는 탭 진입 시 재시도 */
+        }
+      }
+    }
+    const workers = Array.from(
+      { length: Math.min(PREFETCH_CONCURRENCY, queue.length) },
+      () => worker(),
+    )
+    await Promise.all(workers)
+  } finally {
+    prefetchRunning = false
+  }
+}
+
+/** @type {Map<string, { summary: unknown, daily: unknown, byPlatform: unknown, bySegment?: unknown, bySegmentPrev?: unknown, compareYesterday: unknown }>} */
+const rawServerKpiBundleByScope = new Map()
+
+/** 월별 KPI 쿼리를 N개월 이동 (from/to/month) */
+function shiftMonthlyKpiQuery(query, deltaMonths) {
+  const q = { ...query }
+  let mk = String(q.month || '').trim()
+  if (!/^\d{4}-\d{2}$/.test(mk)) {
+    const to = String(q.to || '').trim()
+    const from = String(q.from || '').trim()
+    if (/^\d{4}-\d{2}-\d{2}$/.test(to)) mk = to.slice(0, 7)
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(from)) mk = from.slice(0, 7)
+  }
+  if (!/^\d{4}-\d{2}$/.test(mk)) return null
+  const shifted = addMonthsToMonthKey(mk, deltaMonths)
+  if (!shifted) return null
+  const [y, m] = shifted.split('-').map(Number)
+  const lastDay = new Date(y, m, 0).getDate()
+  q.month = shifted
+  q.from = `${shifted}-01`
+  q.to = `${shifted}-${String(lastDay).padStart(2, '0')}`
+  return q
+}
+
+function monthKeyFromFilters(filters = {}) {
+  const y = String(filters.year || '').trim()
+  const mo = String(filters.month || '').trim()
+  if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
+    return `${y}-${String(Number(mo)).padStart(2, '0')}`
+  }
+  const to = String(filters.dateTo || filters.dateFrom || '').trim()
+  return /^\d{4}-\d{2}/.test(to) ? to.slice(0, 7) : ''
+}
+
+function filtersForMonthKey(baseFilters = {}, monthKey) {
+  if (!/^\d{4}-\d{2}$/.test(String(monthKey || ''))) return { ...baseFilters }
+  const [y, m] = monthKey.split('-')
+  const lastDay = new Date(Number(y), Number(m), 0).getDate()
+  return {
+    ...baseFilters,
+    year: y,
+    month: String(Number(m)),
+    dateFrom: `${monthKey}-01`,
+    dateTo: `${monthKey}-${String(lastDay).padStart(2, '0')}`,
+    platform: '',
+    salesMethod: '',
+  }
+}
+
+function applyRawServerKpiToSlice(scope, bundle) {
+  const slice = getSlice(scope)
+  const { summary, daily, byPlatform, bySegment, bySegmentPrev, compareYesterday } = bundle
   slice.serverKpiBucket.value = summary ? adaptServerKpiToEsserBucket(summary) : null
   slice.serverDailyChartBuckets.value = daily?.items
     ? adaptServerDailyToChartBuckets(daily.items)
     : []
-  slice.serverPlatformKpiRows.value = byPlatform ? adaptServerPlatformKpiRows(byPlatform) : []
+  if (isCombinedScope(scope) && bySegment) {
+    slice.serverPlatformKpiRows.value = adaptServerSegmentKpiRows(bySegment)
+  } else {
+    slice.serverPlatformKpiRows.value = byPlatform ? adaptServerPlatformKpiRows(byPlatform) : []
+    if (!slice.serverPlatformKpiRows.value.length && summary) {
+      slice.serverPlatformKpiRows.value = buildFallbackPlatformRowsFromSummary(summary)
+    }
+  }
+  slice.serverPrevMonthPlatformKpiRows.value =
+    isCombinedScope(scope) && bySegmentPrev
+      ? adaptServerSegmentKpiRows(bySegmentPrev)
+      : []
   slice.serverDayOverDayRows.value = compareYesterday
     ? adaptServerDayOverDayRows(compareYesterday)
     : []
+}
+
+function applyDirectInputKpiMergesToSlice(scope) {
+  const slice = getSlice(scope)
 
   if (shouldMergeOwnMallManualKpi(scope)) {
-    const filterCtx = {
-      ...slice.filters.value,
-      platform: '',
-    }
+    const filterCtx = buildOwnMallKpiFilterCtx(scope, slice.filters.value)
     const ownMallRecords = ownMallManualDetailRecords.value
     const ownMallRow = buildOwnMallPlatformRow(ownMallRecords, filterCtx)
 
@@ -718,6 +1053,13 @@ function applyServerKpiBundleToSlice(scope, bundle) {
       )
       slice.serverDailyChartBuckets.value = mergeOwnMallManualIntoDailyBuckets(
         slice.serverDailyChartBuckets.value,
+        ownMallRecords,
+        filterCtx,
+      )
+    }
+    if (isCombinedScope(scope)) {
+      slice.serverPlatformKpiRows.value = mergeOwnMallIntoCombinedSegmentRows(
+        slice.serverPlatformKpiRows.value,
         ownMallRecords,
         filterCtx,
       )
@@ -749,29 +1091,149 @@ function applyServerKpiBundleToSlice(scope, bundle) {
       salesMethod: '',
     }
     const c1pRecords = coupang1pRocketDetailRecords.value
-    const c1pRow = buildCoupang1pPlatformRow(c1pRecords, filterCtx)
+    const bestheimC1p = filterCoupang1pRecordsByBrand(c1pRecords, 'bestheim')
+    const esserC1p = filterCoupang1pRecordsByBrand(c1pRecords, 'esser')
+    const bestheimRow = buildCoupang1pPlatformRow(bestheimC1p, filterCtx)
+    const esserRow = buildCoupang1pPlatformRow(esserC1p, filterCtx)
 
-    if (c1pRow && !isCombinedScope(scope)) {
+    if (scope === 'platform' || scope === 'platform_monthly') {
       slice.serverPlatformKpiRows.value = mergeCoupang1pIntoServerPlatformRows(
+        slice.serverPlatformKpiRows.value,
+        bestheimC1p,
+        filterCtx,
+      )
+      const total = slice.serverPlatformKpiRows.value.find((r) => r.label === '합계')
+      // 빈 합계로 서버 summary를 덮지 않음 (reshape/merge 회귀)
+      if (total && (Number(total.profit?.sales) || Number(total.rowCount))) {
+        slice.serverKpiBucket.value = esserBucketFromPlatformKpiRow(total)
+      }
+    }
+
+    if (
+      (scope === 'company_b' || scope === 'company_b_monthly') &&
+      esserRow &&
+      !isCombinedScope(scope)
+    ) {
+      slice.serverPlatformKpiRows.value = mergeCoupang1pIntoServerPlatformRows(
+        slice.serverPlatformKpiRows.value,
+        esserC1p,
+        filterCtx,
+      )
+    }
+
+    if (bestheimRow) {
+      if (isCombinedScope(scope)) {
+        slice.serverKpiBucket.value = mergeCoupang1pIntoServerKpiBucket(
+          slice.serverKpiBucket.value,
+          bestheimRow,
+        )
+      }
+    }
+
+    if (esserRow && isCombinedScope(scope)) {
+      slice.serverKpiBucket.value = mergeCoupang1pIntoServerKpiBucket(
+        slice.serverKpiBucket.value,
+        esserRow,
+      )
+    }
+
+    if (esserRow && (scope === 'company_b' || scope === 'company_b_monthly')) {
+      slice.serverKpiBucket.value = mergeCoupang1pIntoServerKpiBucket(
+        slice.serverKpiBucket.value,
+        esserRow,
+      )
+    }
+
+    const dailyC1p =
+      scope === 'company_b' || scope === 'company_b_monthly' ? esserC1p : c1pRecords
+
+    if (isCombinedScope(scope)) {
+      slice.serverPlatformKpiRows.value = mergeCoupang1pIntoCombinedSegmentRows(
         slice.serverPlatformKpiRows.value,
         c1pRecords,
         filterCtx,
       )
     }
-    if (c1pRow) {
-      slice.serverKpiBucket.value = mergeCoupang1pIntoServerKpiBucket(
-        slice.serverKpiBucket.value,
-        c1pRow,
-      )
+
+    if (dailyC1p.length) {
       slice.serverDailyChartBuckets.value = mergeCoupang1pIntoDailyBuckets(
         slice.serverDailyChartBuckets.value,
-        c1pRecords,
+        dailyC1p,
         filterCtx,
       )
     }
   }
 
-  slice.serverKpiLoaded.value = true
+  // 통합 월별 특판·수기 지출 — 서버 month 키 불일치·자사몰 merge 누락 대비 클라 보강
+  if (isCombinedScope(scope) && isMonthlyScope(scope)) {
+    const monthKey = monthKeyFromFilters(slice.filters.value)
+    const specialSale = getSpecialSaleSnapshot(scope, monthKey)
+    slice.serverPlatformKpiRows.value = mergeSpecialSaleIntoCombinedSegmentRows(
+      slice.serverPlatformKpiRows.value,
+      specialSale,
+    )
+    slice.serverPlatformKpiRows.value = mergeManualExpenseIntoCombinedSegmentRows(
+      slice.serverPlatformKpiRows.value,
+      getManualExpenseSnapshot(scope, monthKey),
+    )
+
+    // 전월 by-segment — 자사몰·1P·특판·지출을 전월 기준으로 merge
+    if (monthKey) {
+      const prevMk = addMonthsToMonthKey(monthKey, -1)
+      let prevRows = slice.serverPrevMonthPlatformKpiRows.value || []
+      const prevFilters = filtersForMonthKey(slice.filters.value, prevMk)
+      if (prevRows.length) {
+        if (shouldMergeOwnMallManualKpi(scope)) {
+          prevRows = mergeOwnMallIntoCombinedSegmentRows(
+            prevRows,
+            ownMallManualDetailRecords.value,
+            buildOwnMallKpiFilterCtx(scope, prevFilters),
+          )
+        }
+        if (shouldMergeCoupang1pKpi(scope)) {
+          prevRows = mergeCoupang1pIntoCombinedSegmentRows(
+            prevRows,
+            coupang1pRocketDetailRecords.value,
+            { ...prevFilters, platform: '', salesMethod: '' },
+          )
+        }
+      }
+      prevRows = mergeSpecialSaleIntoCombinedSegmentRows(
+        prevRows,
+        getSpecialSaleSnapshot(scope, prevMk, { allowLegacy: false }),
+      )
+      prevRows = mergeManualExpenseIntoCombinedSegmentRows(
+        prevRows,
+        getManualExpenseSnapshot(scope, prevMk, { allowLegacy: false }),
+      )
+      slice.serverPrevMonthPlatformKpiRows.value = prevRows
+    }
+  }
+}
+
+function reapplyDirectInputKpiMergesForScope(scope) {
+  const bundle = rawServerKpiBundleByScope.get(scope)
+  if (!bundle) return
+  const slice = getSlice(scope)
+  if (!slice.serverKpiLoaded.value) return
+  applyRawServerKpiToSlice(scope, bundle)
+  applyDirectInputKpiMergesToSlice(scope)
+}
+
+/**
+ * 서버 KPI 응답을 slice에 반영 (+ 수기 merge)
+ * @param {string} scope
+ * @param {{ summary: unknown, daily: unknown, byPlatform: unknown, bySegment?: unknown, compareYesterday: unknown }} bundle
+ */
+function applyServerKpiBundleToSlice(scope, bundle) {
+  rawServerKpiBundleByScope.set(scope, bundle)
+  applyRawServerKpiToSlice(scope, bundle)
+  try {
+    applyDirectInputKpiMergesToSlice(scope)
+  } catch {
+    /* 직접입력 merge 실패해도 서버 KPI는 유지 */
+  }
+  getSlice(scope).serverKpiLoaded.value = true
 }
 
 /**
@@ -801,101 +1263,159 @@ async function loadServerKpiForScope(scope, opts = {}) {
   }
   const { signal } = abortController
 
+  const isCurrent = () =>
+    requestSequence === kpiRequestSequenceByScope.get(scope) &&
+    kpiLastCacheKeyByScope.get(scope) === cacheKey
+
   try {
     if (opts.forceRefresh) {
-      serverKpiResultCache.invalidate(cacheKey)
+      // inflight 삭제 금지 — 진행 중 fetch를 끊고 빈 캐시로 남는 회귀 방지
+      serverKpiResultCache.invalidateResult(cacheKey)
     }
 
     const bundle = await serverKpiResultCache.getOrLoad(cacheKey, async () => {
-      const [summary, daily, byPlatform, compareYesterday] = await Promise.all([
-        fetchKpiSummary(query, { signal }),
-        fetchKpiDaily(query, { signal }),
-        fetchKpiByPlatform(query, { signal }),
-        fetchKpiCompareYesterday(query, { signal }),
-      ])
-      return { summary, daily, byPlatform, compareYesterday }
+      const combined = isCombinedScope(scope)
+      const summary = await fetchKpiSummary(query, { signal })
+      let daily = { items: [] }
+      try {
+        daily = await fetchKpiDaily(query, { signal })
+      } catch (err) {
+        if (err?.name === 'AbortError') throw err
+        daily = { items: [] }
+      }
+      let byPlatform = null
+      let bySegment = null
+      let bySegmentPrev = null
+      let compareYesterday = null
+      if (!combined) {
+        try {
+          byPlatform = await fetchKpiByPlatform(query, { signal })
+        } catch (err) {
+          if (err?.name === 'AbortError') throw err
+          byPlatform = null
+        }
+      } else {
+        try {
+          bySegment = await fetchKpiBySegment(query, { signal })
+        } catch (err) {
+          if (err?.name === 'AbortError') throw err
+          bySegment = null
+        }
+        // 통합 월별 전월대비 — 전월 세그먼트(특판 포함) 병행 조회
+        if (isMonthlyScope(scope)) {
+          const prevQuery = shiftMonthlyKpiQuery(query, -1)
+          if (prevQuery) {
+            try {
+              bySegmentPrev = await fetchKpiBySegment(prevQuery, { signal })
+            } catch (err) {
+              if (err?.name === 'AbortError') throw err
+              bySegmentPrev = null
+            }
+          }
+        }
+      }
+      try {
+        compareYesterday = await fetchKpiCompareYesterday(query, { signal })
+      } catch (err) {
+        if (err?.name === 'AbortError') throw err
+        compareYesterday = null
+      }
+      return { summary, daily, byPlatform, bySegment, bySegmentPrev, compareYesterday }
     })
 
-    if (requestSequence !== kpiRequestSequenceByScope.get(scope)) return
-    if (signal.aborted) return
-
+    // 최신 요청만 반영. 동일 조건의 캐시는 남아 후속 요청/ensure가 재적용 가능
+    if (!isCurrent()) return
     applyServerKpiBundleToSlice(scope, bundle)
   } catch (e) {
-    if (e?.name === 'AbortError' || signal.aborted) return
-    if (requestSequence !== kpiRequestSequenceByScope.get(scope)) return
+    if (e?.name === 'AbortError' || signal.aborted) {
+      // 조건이 바뀌어 취소된 경우 — 최신 요청이 이어서 처리
+      if (isCurrent()) {
+        const cached = serverKpiResultCache.get(cacheKey)
+        if (cached) applyServerKpiBundleToSlice(scope, cached)
+      }
+      return
+    }
+    if (!isCurrent()) return
 
-    // 실패 시 캐시된 이전 값이 있으면 stale 유지
     const stale = serverKpiResultCache.get(cacheKey)
     if (stale) {
       applyServerKpiBundleToSlice(scope, stale)
       return
     }
 
+    // 이미 화면에 붙은 KPI를 실패 처리로 지우지 않음
+    if (slice.serverKpiBucket.value != null || slice.serverPlatformKpiRows.value.length) {
+      slice.serverKpiLoaded.value = true
+      error.value = `KPI API 불러오기 실패: ${e.message}`
+      return
+    }
+
     slice.serverKpiBucket.value = null
     slice.serverDailyChartBuckets.value = []
     slice.serverPlatformKpiRows.value = []
+    slice.serverPrevMonthPlatformKpiRows.value = []
     slice.serverDayOverDayRows.value = []
-    slice.serverKpiLoaded.value = false
+    slice.serverKpiLoaded.value = true
     error.value = `KPI API 불러오기 실패: ${e.message}`
     throw e
   }
 }
 
 /**
- * detail 백그라운드 로드.
- * - 통합: 브랜드 세그먼트(베스트하임·사본느리·자사몰·파워 등) 표에 필요 → lazy여도 prefetch
- * - 기타/플랫폼: 서버 KPI만으로 충분 → lazy면 skip
+ * 예전: 표 펼침 전 전량 detail 캐시 prefetch.
+ * 1단계: 표는 서버 페이지네이션이므로 전량 로드하지 않는다.
  */
-function loadDetailInBackground(scope) {
-  if (scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE) return
-  if (scope === 'other_sellers') return
-  if (isLazyDetailLoad() && !isCombinedScope(scope)) return
-  const cacheFresh =
-    detailCacheLoaded.value && detailCacheLoadedVersion === detailCacheVersion
-  if (cacheFresh || detailCacheLoading.value) return
-
-  const run = () => {
-    ensureDetailCache()
-      .then(() => loadRecordsForScope(scope, { silent: true }))
-      .catch(() => {
-        /* detailCacheError set in composable */
-      })
-  }
-
-  if (typeof requestIdleCallback === 'function') {
-    requestIdleCallback(run, { timeout: 2500 })
-  } else {
-    setTimeout(run, 400)
-  }
+function loadDetailInBackground(_scope) {
+  return
 }
 
-/** 대시보드 — KPI API 우선. 통합만 세그먼트용 detail을 백그라운드 로드 */
+/** 대시보드 — KPI API 우선. detail은 lazy가 아니면 BG 로드(표용) */
 async function ensureDashboardReady(scope) {
   await ensureCoreLoaded()
-  if (
-    isServerKpi() &&
-    scope !== POWER_PRICE_SCOPE &&
-    scope !== COUPANG_1P_ROCKET_SCOPE
-  ) {
-    loading.value = true
+  if (isServerKpi() && scope !== POWER_PRICE_SCOPE && scope !== COUPANG_1P_ROCKET_SCOPE) {
     error.value = ''
+    const { bundle: cachedBundle } = getServerKpiCacheBundle(scope)
+
+    // TTL 캐시 히트 — loading 없이 즉시 표시
+    if (cachedBundle) {
+      applyServerKpiBundleToSlice(scope, cachedBundle)
+      if (!isLazyDetailLoad()) loadDetailInBackground(scope)
+      schedulePrefetchDashboardKpis(scope)
+      return
+    }
+
+    // 슬라이스에 이전 방문 KPI가 있으면 즉시 표시 + 백그라운드 재검증
+    if (sliceHasWarmServerKpi(scope)) {
+      if (!isLazyDetailLoad()) loadDetailInBackground(scope)
+      void loadServerKpiForScope(scope).catch(() => {
+        /* error set in loader */
+      })
+      schedulePrefetchDashboardKpis(scope)
+      return
+    }
+
+    // 첫 방문(콜드) — 네트워크 대기
+    loading.value = true
     try {
       await loadServerKpiForScope(scope)
-      if (!isLazyDetailLoad() && isCombinedScope(scope)) {
-        await ensureDetailCache()
-        await loadRecordsForScope(scope, { silent: true })
-      } else if (isCombinedScope(scope)) {
-        // 상단 KPI는 서버로 먼저 표시 → detail은 BG로 세그먼트 표 채움
-        loadDetailInBackground(scope)
-      } else if (!isLazyDetailLoad()) {
+      // watch 등으로 시퀀스가 밀려 apply가 스킵된 경우 최신 요청을 한 번 더 대기
+      if (!getSlice(scope).serverKpiLoaded.value) {
+        await loadServerKpiForScope(scope)
+      }
+      if (!getSlice(scope).serverKpiLoaded.value) {
+        const { bundle } = getServerKpiCacheBundle(scope)
+        if (bundle) applyServerKpiBundleToSlice(scope, bundle)
+      }
+      if (!isLazyDetailLoad()) {
         loadDetailInBackground(scope)
       }
-      // other_sellers·platform lazy: detail prefetch 없음
     } catch {
-      /* error set */
+      const { bundle } = getServerKpiCacheBundle(scope)
+      if (bundle) applyServerKpiBundleToSlice(scope, bundle)
     } finally {
       loading.value = false
     }
+    schedulePrefetchDashboardKpis(scope)
     return
   }
   if (scope !== POWER_PRICE_SCOPE && scope !== COUPANG_1P_ROCKET_SCOPE) {
@@ -906,12 +1426,6 @@ async function ensureDashboardReady(scope) {
 
 async function ensureLoaded() {
   await ensureCoreLoaded()
-  if (detailCacheLoaded.value) return
-  try {
-    await refreshAll()
-  } catch (e) {
-    error.value = `데이터 불러오기 실패: ${e.message}`
-  }
 }
 
 async function refreshAfterUpload(scopes = ['platform']) {
@@ -921,15 +1435,9 @@ async function refreshAfterUpload(scopes = ['platform']) {
   invalidateDetailCache()
   if (isServerKpi()) {
     await Promise.all(scopeList.map((s) => loadServerKpiForScope(s, { forceRefresh: true })))
-    // KPI만 즉시 갱신. detail은 다음 펼침/엑셀 때 로드 (lazy 기본)
-    if (!isLazyDetailLoad()) {
-      if (
-        scopeList.some((s) => isCombinedScope(s) || s === 'other_sellers') ||
-        detailCacheLoading.value
-      ) {
-        await ensureDetailCache({ forceRefresh: true })
-      }
-    }
+    await Promise.all(
+      scopeList.map((s) => loadTablePageForScope(s, { page: 1, silent: true }).catch(() => {})),
+    )
   } else {
     await refreshAll()
   }
@@ -1117,7 +1625,8 @@ function createScopedApi(scope) {
         period: isMonthlyScope(scope) ? 'monthly' : 'daily',
       }
       if (isMonthlyScope(scope)) {
-        const spendOnly = scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE
+        const spendOnly =
+          scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE
         // 광고는 일별 scope에서 조회 (일별=월별 동일 데이터)
         const monthlyManualAd = isCombinedScope(scope)
           ? combinedManualAdChannelGroups(scope).flatMap((g) => g.entries || [])
@@ -1152,33 +1661,27 @@ function createScopedApi(scope) {
 
   const recordsForActiveTab = computed(() => {
     const tab = slice.activeTab.value
-    if (tab === 'daily') return dailyFromDetails.value
-    if (tab === 'detail') return scopedSaleDetails.value
-    if (tab === 'returns') return scopedReturnDetails.value
-    if (scope !== 'sales_report') {
-      const details = detailsForSummaryAggregation(scope, slice)
-      if (details.length) return buildSummaryTabFromDetails(tab, details)
-    }
-    const stored = applyUploadScope(filterByScope(slice.records.value, scope), slice.selectedUploadIds)
-    if (stored.length) return stored
-    const details = detailsForSummaryAggregation(scope, slice)
-    if (details.length) return buildSummaryTabFromDetails(tab, details)
-    return []
+    if (SERVER_PAGED_TABLE_TABS.has(tab)) return slice.tablePageRecords.value
+    return applyUploadScope(filterByScope(slice.records.value, scope), slice.selectedUploadIds)
   })
 
   const filteredRecords = computed(() => {
+    const tab = slice.activeTab.value
     const base = recordsForActiveTab.value
-    if (slice.activeTab.value === 'daily') {
+    if (SERVER_PAGED_TABLE_TABS.has(tab)) return base
+    if (tab === 'daily') {
       const dateQ = slice.filters.value.date
       if (!dateQ) return base
       return base.filter((r) => String(r.date || '').includes(dateQ))
     }
-    return applyRecordFilters(base, slice.activeTab.value, slice.filters.value)
+    return applyRecordFilters(base, tab, slice.filters.value)
   })
 
-  const sortedFilteredRecords = computed(() =>
-    sortRecordsForTab(filteredRecords.value, slice.activeTab.value),
-  )
+  const sortedFilteredRecords = computed(() => {
+    const tab = slice.activeTab.value
+    if (SERVER_PAGED_TABLE_TABS.has(tab)) return slice.tablePageRecords.value
+    return sortRecordsForTab(filteredRecords.value, tab)
+  })
 
   const availableYears = computed(() => {
     const base = [
@@ -1230,20 +1733,22 @@ function createScopedApi(scope) {
   const scopedUploads = computed(() => uploadsByKind(scope))
 
   async function ensureDetailForScope() {
-    if (scope === POWER_PRICE_SCOPE || scope === COUPANG_1P_ROCKET_SCOPE) return
-    await ensureDetailCache()
-    await loadRecordsForScope(scope, { silent: true })
+    await loadTablePageForScope(scope, { silent: true })
   }
 
   async function switchTab(type) {
     slice.activeTab.value = type
-    if (scope !== POWER_PRICE_SCOPE && scope !== COUPANG_1P_ROCKET_SCOPE) {
-      await ensureDetailCache()
-      if (type !== 'detail' && type !== 'returns') {
-        await ensureTabAggregateCache(type)
-      }
+    slice.tablePagination.value = {
+      ...slice.tablePagination.value,
+      page: 1,
     }
     await loadRecordsForScope(scope)
+  }
+
+  async function goTablePage(page) {
+    const totalPages = slice.tablePagination.value.totalPages || 1
+    const next = Math.min(Math.max(1, Number(page) || 1), totalPages)
+    await loadTablePageForScope(scope, { page: next })
   }
 
   function clearUploadSelection() {
@@ -1277,33 +1782,22 @@ function createScopedApi(scope) {
       const channel = getChannelByScope(scope)
       const adPeriod = isMonthlyScope(scope) ? 'monthly' : 'daily'
       const adChannel = findExternalAdChannelByScope(scope)
-      const manualScopes = combined
-        ? combinedManualAdScopes(scope)
-        : [resolveExternalAdScope(adChannel, 'daily') || dailyScopeForMonthly(scope)].filter(Boolean)
-      await Promise.all(manualScopes.map((s) => hydrateManualAdForScope(s)))
 
-      if (combined) {
-        await hydrateCombinedCommentsForScope(scope)
-      }
-      if (combined && isMonthlyScope(scope)) {
-        await hydrateSpecialSaleForScope(scope)
+      // 서버 export는 DB에서 수기 광고·특판을 다시 읽음 — 클라 hydrate 생략(풀·요청 경합 완화)
+      if (!canPgExport) {
+        const manualScopes = combined
+          ? combinedManualAdScopes(scope)
+          : [resolveExternalAdScope(adChannel, 'daily') || dailyScopeForMonthly(scope)].filter(Boolean)
+        await Promise.all(manualScopes.map((s) => hydrateManualAdForScope(s)))
       }
 
       // Phase 4: 통합 포함 — 서버 export 우선 (detail/ExcelJS 메인스레드 회피)
       if (canPgExport) {
         const f = slice.filters.value
         const overrides = {}
-        if (combined) {
-          overrides.combined_comments = getCombinedCommentsSnapshot(scope, {
-            dateFrom: f.dateFrom || '',
-            dateTo: f.dateTo || '',
-          })
-          if (isMonthlyScope(scope)) {
-            const monthKey =
-              resolveReferenceMonthKey([], { ...f, period: adPeriod }) ||
-              (f.dateTo ? String(f.dateTo).slice(0, 7) : '')
-            overrides.special_sale = getSpecialSaleSnapshot(scope, monthKey)
-          }
+        if (combined && isMonthlyScope(scope)) {
+          overrides.special_sale = getSpecialSaleSettingPayload(scope)
+          overrides.manual_expense = getManualExpenseSettingPayload(scope)
         }
         try {
           const { blob, fileName } = await pgDownloadIntegratedExport(
@@ -1311,6 +1805,8 @@ function createScopedApi(scope) {
               scope,
               from: f.dateFrom,
               to: f.dateTo,
+              year: f.year,
+              month: f.month,
               platform: f.platform,
               sales_method: f.salesMethod,
               include_manual_ads: 'true',
@@ -1323,22 +1819,19 @@ function createScopedApi(scope) {
             : '매출 리포트 엑셀 다운로드 완료 (PG API)'
           return
         } catch (pgErr) {
-          // 서버 실패 시에만 클라 ExcelJS fallback
-          console.warn('PG export 실패, 클라이언트 fallback:', pgErr?.message || pgErr)
+          error.value = `엑셀 다운로드 실패: ${pgErr?.message || pgErr}`
+          return
         }
       }
 
-      // ExcelJS fallback — detail 캐시 필요
-      try {
-        await ensureDetailForScope()
-      } catch {
-        /* fall through */
-      }
-      const rows = filteredDetailForCharts.value
-      if (!rows.length) {
-        error.value = '다운로드할 데이터가 없습니다. 필터·업로드 선택을 확인하세요.'
+      if (!detailCacheLoaded.value || !filteredDetailForCharts.value.length) {
+        error.value =
+          '서버 엑셀을 사용할 수 없어 다운로드하지 않았습니다. 전량 데이터를 다시 불러오지 않습니다.'
         return
       }
+
+      // ExcelJS fallback — 이미 로드된 캐시만 사용 (전량 재조회 없음)
+      const rows = filteredDetailForCharts.value
 
       const scopeManualAd = getManualAdSnapshot(dailyScopeForMonthly(scope))
       const manualAdByChannel = combined
@@ -1370,12 +1863,8 @@ function createScopedApi(scope) {
         manualAdEntries: scopeManualAd,
         specialSale: monthlyCombined ? getSpecialSaleSnapshot(scope, monthKey) : null,
         specialSaleByMonth,
-        combinedComments: combined
-          ? getCombinedCommentsSnapshot(scope, {
-              dateFrom: slice.filters.value.dateFrom || '',
-              dateTo: slice.filters.value.dateTo || '',
-            })
-          : null,
+        manualExpense: monthlyCombined ? getManualExpenseSnapshot(scope, monthKey) : null,
+        combinedComments: null,
         profitLossTemplate: combined ? getProfitLossTemplateSnapshot() : null,
         hiddenKpiKeys: combined
           ? COMBINED_HIDDEN_KPI_KEYS
@@ -1384,6 +1873,11 @@ function createScopedApi(scope) {
             : scope === COUPANG_1P_ROCKET_SCOPE
               ? COUPANG_1P_ROCKET_HIDDEN_KPI_KEYS
               : [],
+        summarySheetOnly: isMonthlyScope(scope),
+        serverPlatformKpiRows: monthlyCombined ? slice.serverPlatformKpiRows.value || [] : [],
+        serverPrevMonthPlatformKpiRows: monthlyCombined
+          ? slice.serverPrevMonthPlatformKpiRows.value || []
+          : [],
       })
       success.value = integratedSummary
         ? `통합 손익계산 엑셀 완료 — ①요약리포트 시트 확인 (양식 v${INTEGRATED_REPORT_LAYOUT_VER} · 빌드 ${UI_BUILD_ID})`
@@ -1396,30 +1890,47 @@ function createScopedApi(scope) {
   }
 
   async function downloadCurrentTableExport() {
-    const rows = sortedFilteredRecords.value
     const tab = slice.activeTab.value
-    let cols = resolveTableColumns()
-    if (tab === 'detail') {
-      cols = resolveDetailColumns(scopedSaleDetails.value)
-    } else if (tab === 'returns') {
-      cols = resolveDetailColumns(scopedReturnDetails.value)
-    } else if (usesEsserDashboard(scope) || scopedDetailRecords.value.some(isEsserDetailRow)) {
-      cols = resolveSummaryColumns(tab, scopedDetailRecords.value)
-    } else {
-      cols = RECORD_TYPES[tab]?.columns || []
-    }
-    if (!rows.length) {
-      error.value = '다운로드할 표 데이터가 없습니다.'
-      return
-    }
     error.value = ''
     saving.value = true
     try {
+      if (SERVER_PAGED_TABLE_TABS.has(tab)) {
+        const { q } = buildTableListQuery(scope, slice, { page: 1, tab })
+        const { blob, fileName, rowCount } = await pgDownloadTableExport({
+          scope,
+          tab,
+          start_date: q.start_date,
+          end_date: q.end_date,
+          platform: q.platform,
+          sales_method: q.sales_method,
+          brand: q.brand,
+          channel: q.channel,
+          product_name: q.product_name,
+          option: q.option,
+          date: q.date,
+          year: q.year,
+          month: q.month,
+          day_of_week: q.day_of_week,
+          upload_ids: q.upload_ids,
+          sort: q.sort,
+          order: q.order,
+        })
+        triggerBlobDownload(blob, fileName)
+        const countLabel = rowCount ? `${rowCount}건` : '전체'
+        success.value = `${RECORD_TYPES[tab]?.label || '데이터'} ${countLabel} 엑셀 다운로드 완료`
+        return
+      }
+
+      const rows = sortedFilteredRecords.value
+      if (!rows.length) {
+        error.value = '다운로드할 표 데이터가 없습니다.'
+        return
+      }
       const channel = getChannelByScope(scope)
       const { downloadTableExcel } = await import('../utils/dashboardExporter.js')
       await downloadTableExcel({
         rows,
-        columns: cols,
+        columns: resolveTableColumns(),
         sheetName: RECORD_TYPES[tab]?.label || tab,
         channelLabel: channel?.tabLabel || '매출',
         filters: { ...slice.filters.value },
@@ -1432,29 +1943,42 @@ function createScopedApi(scope) {
     }
   }
 
-  function downloadMergedExcel() {
+  async function downloadMergedExcel() {
     if (slice.selectedUploadIds.value.length < 2) {
       error.value = '통합할 업로드를 2개 이상 선택하세요.'
       return
     }
-    const details = applyRecordFilters(scopedSaleDetails.value, 'detail', {
-      year: '',
-      month: '',
-      dayOfWeek: '',
-      date: '',
-      channel: '',
-      brand: '',
-      productName: '',
-      option: '',
-    })
-    if (!details.length) {
-      error.value = '통합할 판매 상세 데이터가 없습니다.'
-      return
-    }
-    const selected = uploads.value.filter((u) => slice.selectedUploadIds.value.includes(u.id))
-    downloadMergedSalesReport(details, mergedFileName(selected))
-    success.value = `${selected.length}개 파일 통합 엑셀을 다운로드했습니다. (${dateRangeLabel(details) || '기간 미상'})`
     error.value = ''
+    saving.value = true
+    try {
+      const fetched = await fetchRecordsByUploadIds(
+        'detail',
+        slice.selectedUploadIds.value,
+      )
+      const details = applyRecordFilters(fetched, 'detail', {
+        year: '',
+        month: '',
+        dayOfWeek: '',
+        date: '',
+        channel: '',
+        brand: '',
+        productName: '',
+        option: '',
+      }).filter((r) => !isReturnRecord(r) && !isEsserSheetTotalRecord(r))
+      if (!details.length) {
+        error.value = '통합할 판매 상세 데이터가 없습니다.'
+        return
+      }
+      const selected = uploads.value.filter((u) =>
+        slice.selectedUploadIds.value.includes(u.id),
+      )
+      downloadMergedSalesReport(details, mergedFileName(selected))
+      success.value = `${selected.length}개 파일 통합 엑셀을 다운로드했습니다. (${dateRangeLabel(details) || '기간 미상'})`
+    } catch (e) {
+      error.value = `엑셀 다운로드 실패: ${e.message}`
+    } finally {
+      saving.value = false
+    }
   }
 
   function clearFilters() {
@@ -1463,7 +1987,9 @@ function createScopedApi(scope) {
 
   function resolveTableColumns() {
     const tab = slice.activeTab.value
-    const details = scopedDetailRecords.value
+    const details = SERVER_PAGED_TABLE_TABS.has(tab)
+      ? slice.tablePageRecords.value
+      : slice.records.value
     if (tab === 'detail' || tab === 'returns') {
       return sanitizeDetailColumns(resolveDetailColumns(details))
     }
@@ -1471,6 +1997,10 @@ function createScopedApi(scope) {
       return resolveSummaryColumns(tab, details)
     }
     return sanitizeDetailColumns(RECORD_TYPES[tab]?.columns || [])
+  }
+
+  async function loadTablePage(opts = {}) {
+    await loadTablePageForScope(scope, opts)
   }
 
   return {
@@ -1498,6 +2028,10 @@ function createScopedApi(scope) {
     dashboardDayOverDayRecords,
     sortedFilteredRecords,
     recordsForActiveTab,
+    tablePagination: slice.tablePagination,
+    tableLoading: slice.tableLoading,
+    tableSaleTotal: slice.tableSaleTotal,
+    tableReturnTotal: slice.tableReturnTotal,
     availableYears,
     monthOptions,
     weekdayOptions,
@@ -1507,19 +2041,23 @@ function createScopedApi(scope) {
     serverKpiBucket: slice.serverKpiBucket,
     serverDailyChartBuckets: slice.serverDailyChartBuckets,
     serverPlatformKpiRows: slice.serverPlatformKpiRows,
+    serverPrevMonthPlatformKpiRows: slice.serverPrevMonthPlatformKpiRows,
     serverDayOverDayRows: slice.serverDayOverDayRows,
     serverKpiLoaded: slice.serverKpiLoaded,
     usesServerKpiMode,
-    reloadServerKpi: () => loadServerKpiForScope(scope),
+    reloadServerKpi: (opts = {}) => loadServerKpiForScope(scope, opts),
     uploadsByKind,
     uploadSalesMethod,
     ensureLoaded,
     ensureDashboardReady,
+    schedulePrefetchDashboardKpis,
     ensureDetailCache,
     ensureDetailForScope,
     retryDetailCache,
     refreshAll,
     switchTab,
+    goTablePage,
+    loadTablePage,
     openEdit,
     onSaveEdit,
     onDelete,
@@ -1538,6 +2076,35 @@ function createScopedApi(scope) {
 }
 
 const scopedApiCache = Object.fromEntries(allDataScopes().map((s) => [s, createScopedApi(s)]))
+
+watch(
+  ownMallManualDetailRecords,
+  () => {
+    for (const scope of allDataScopes()) {
+      if (!shouldMergeOwnMallManualKpi(scope)) continue
+      reapplyDirectInputKpiMergesForScope(scope)
+    }
+  },
+  { deep: true },
+)
+
+watch(
+  () => {
+    const keys = ['combined_daily', 'combined_monthly']
+    return keys
+      .map((s) => {
+        const store = getSpecialSaleReactiveStore(s)
+        return `${JSON.stringify(store.months)}|${JSON.stringify(store.legacyEntries)}`
+      })
+      .join('||')
+  },
+  () => {
+    for (const scope of allDataScopes()) {
+      if (!isCombinedScope(scope) || !isMonthlyScope(scope)) continue
+      reapplyDirectInputKpiMergesForScope(scope)
+    }
+  },
+)
 
 function getScopedApi(scope) {
   if (!scopedApiCache[scope]) scopedApiCache[scope] = createScopedApi(scope)
@@ -1568,6 +2135,7 @@ export function useSalesData(options = {}) {
     ensureLoaded,
     ensureCoreLoaded,
     ensureDashboardReady,
+    schedulePrefetchDashboardKpis,
     ensureDetailCache,
     retryDetailCache,
     reloadUploadList: loadUploads,

@@ -177,19 +177,30 @@ export function buildSummaryTabFromDetails(type, details) {
     let seed = null
 
     if (type === 'channel') {
-      key = resolveRecordPlatform(row)
-      if (!key || key === '미지정') continue
-      seed = { channel: key, platform: key }
+      const platform = resolveRecordPlatform(row)
+      if (!platform || platform === '미지정') continue
+      const source = String(row.dataSourceLabel || '').trim()
+      key = `${source}\0${platform}`
+      seed = {
+        channel: source || platform,
+        platform,
+        dataSourceLabel: source,
+      }
     } else if (type === 'product') {
-      key = (row.productName || '').trim()
-      if (!key) continue
-      seed = { productName: key }
+      const name = (row.productName || '').trim()
+      if (!name) continue
+      const source = String(row.dataSourceLabel || '').trim()
+      const platform = resolveRecordPlatform(row) || row.platform || ''
+      key = `${source}\0${platform}\0${name}`
+      seed = { productName: name, platform, channel: platform, dataSourceLabel: source }
     } else if (type === 'productOption') {
       const p = (row.productName || '').trim()
       const o = String(row.option || row.optionName || '').trim()
       if (!p) continue
-      key = `${p}\0${o}`
-      seed = { productName: p, option: o }
+      const source = String(row.dataSourceLabel || '').trim()
+      const platform = resolveRecordPlatform(row) || row.platform || ''
+      key = `${source}\0${platform}\0${p}\0${o}`
+      seed = { productName: p, option: o, platform, dataSourceLabel: source }
     } else {
       continue
     }
@@ -202,11 +213,25 @@ export function buildSummaryTabFromDetails(type, details) {
     .map((agg, i) => {
       let seed
       if (type === 'channel') {
-        seed = { channel: agg.channel, platform: agg.platform }
+        seed = {
+          channel: agg.channel,
+          platform: agg.platform,
+          dataSourceLabel: agg.dataSourceLabel || '',
+        }
       } else if (type === 'product') {
-        seed = { productName: agg.productName }
+        seed = {
+          productName: agg.productName,
+          platform: agg.platform || '',
+          channel: agg.channel || agg.platform || '',
+          dataSourceLabel: agg.dataSourceLabel || '',
+        }
       } else {
-        seed = { productName: agg.productName, option: agg.option }
+        seed = {
+          productName: agg.productName,
+          option: agg.option,
+          platform: agg.platform || '',
+          dataSourceLabel: agg.dataSourceLabel || '',
+        }
       }
       return summaryRowFromBucket(type, seed, agg, i)
     })

@@ -1,10 +1,10 @@
 import { getPool } from '../db/pool.js'
 import { getSetting } from '../repositories/settingsRepository.js'
 import { adaptPgRecordFromRow } from '../utils/pgRecordAdapter.js'
-import { parseKpiQuery } from '../repositories/kpiRepository.js'
+import { parseKpiQuery, buildKpiWhere } from '../repositories/kpiRepository.js'
+import { addDaysToYmd } from '../utils/esserKpiAggregate.js'
 import { loadManualAdEntriesForScope } from './manualAdLoadService.js'
 import { filterByScope } from '../utils/scopeFilter.js'
-import { allowedUploadKindsForScope } from '../../../src/utils/scopeFilter.js'
 import {
   getChannelByScope,
   isCombinedScope,
@@ -16,8 +16,17 @@ import {
   applyRecordFilters,
   applyKpiDetailFilters,
   filtersForDayOverDayLookup,
+  resolveRecordDateForAggregation,
 } from '../../../src/utils/recordFilters.js'
 import { enrichExportRecords } from '../../../src/utils/combinedExportRecords.js'
+import { resolveOwnMallStoreForKpi } from '../../../src/utils/ownMallRecords.js'
+import { buildSpecialSaleMonthlyTotals, addMonthsToMonthKey } from '../../../src/utils/dayOverDaySales.js'
+import { pickSpecialSaleSettingForMonth, mergeSpecialSaleSettingRaw } from '../../../src/utils/specialSaleKpi.js'
+import {
+  pickManualExpenseSettingForMonth,
+  mergeManualExpenseSettingRaw,
+} from '../../../src/utils/manualExpenseKpi.js'
+import { buildKpiSplitRowsForChannel } from '../../../src/utils/platformKpiSplit.js'
 import {
   COMBINED_HIDDEN_KPI_KEYS,
   combinedManualAdScopes,
@@ -37,12 +46,6 @@ import {
   PROFIT_LOSS_TEMPLATE_SCOPE,
   PROFIT_LOSS_TEMPLATE_KIND,
 } from '../../../src/config/profitLossReport.js'
-import {
-  COMBINED_COMMENTS_SETTING_KIND,
-  COMBINED_COMMENTS_SETTING_SCOPE,
-  listCombinedCommentsInRange,
-  normalizeCombinedCommentsStore,
-} from '../../../src/config/combinedComments.js'
 
 function parseExportQuery(query = {}) {
   const kpi = parseKpiQuery(query)
@@ -53,33 +56,53 @@ function parseExportQuery(query = {}) {
   }
 }
 
+/** export SQL — 전월 대비용 from (월별은 전월 1일, 일별은 40일) */
+function exportSqlFilters(filters) {
+  if (!filters.from || !filters.to) return filters
+  const scope = filters.scope || ''
+  let widenedFrom = filters.from
+
+  if (isMonthlyScope(scope)) {
+    const m = String(filters.from).match(/^(\d{4})-(\d{2})/)
+    if (m) {
+      const y = Number(m[1])
+      const mo = Number(m[2])
+      widenedFrom = mo === 1 ? `${y - 1}-12-01` : `${y}-${String(mo - 1).padStart(2, '0')}-01`
+    }
+  } else {
+    widenedFrom = addDaysToYmd(filters.from, -40) || filters.from
+  }
+
+  if (!widenedFrom || widenedFrom === filters.from) return filters
+  return { ...filters, from: widenedFrom }
+}
+
+/** enrich 직후 — 수기(자사몰·PP·1P) 전체 이력이 붙지 않도록 export 창으로 자름 */
+function recordOverlapsExportWindow(row, from, to) {
+  if (!from || !to) return true
+  const d = resolveRecordDateForAggregation(row)
+  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    return d >= from && d <= to
+  }
+  const pf = String(row.periodFrom || row.period_from || '').slice(0, 10)
+  const pt = String(row.periodTo || row.period_to || '').slice(0, 10)
+  if (pf && pt) return pf <= to && pt >= from
+  if (pf) return pf >= from && pf <= to
+  return true
+}
+
+function trimRecordsToExportWindow(rows, from, to) {
+  if (!from || !to || !rows?.length) return rows || []
+  return rows.filter((r) => recordOverlapsExportWindow(r, from, to))
+}
+
 async function loadDetailRows(filters) {
   const pool = getPool()
-  const clauses = [`record_type = 'detail'`]
-  const params = []
-  let i = 1
+  const { where, params } = buildKpiWhere(exportSqlFilters(filters))
+  const whereClause = where
+    ? where.replace(/^WHERE /i, "WHERE record_type = 'detail' AND ")
+    : "WHERE record_type = 'detail'"
 
-  const scope = filters.scope || ''
-  const kinds = allowedUploadKindsForScope(scope)
-  if (kinds.length) {
-    clauses.push(`upload_kind = ANY($${i++}::text[])`)
-    params.push(kinds)
-  }
-
-  if (filters.platform) {
-    clauses.push(`platform = $${i++}`)
-    params.push(filters.platform)
-  }
-  if (filters.salesMethod) {
-    clauses.push(`sales_method = $${i++}`)
-    params.push(filters.salesMethod)
-  }
-  if (filters.storeName) {
-    clauses.push(`store_name = $${i++}`)
-    params.push(filters.storeName)
-  }
-
-  const where = `WHERE ${clauses.join(' AND ')}`
   const res = await pool.query(
     `SELECT
        id, upload_id, record_type,
@@ -88,12 +111,13 @@ async function loadDetailRows(filters) {
        product_code, product_name, option_name,
        sales, sales_qty, net_profit, ad_spend,
        transaction_type, upload_kind, upload_format,
-       data, created_at, updated_at
-     FROM sales_records ${where}
+       data, created_at, updated_at, kpi_date
+     FROM sales_records ${whereClause}
      ORDER BY created_at ASC`,
     params,
   )
   let rows = res.rows.map(adaptPgRecordFromRow).filter(Boolean)
+  const scope = filters.scope || ''
   if (scope) {
     rows = filterByScope(rows, scope)
   }
@@ -119,44 +143,33 @@ function parseSettingOverride(raw) {
   return null
 }
 
-/** DB·클라이언트 스냅샷 → { entries } (월별 저장 구조 호환) */
-function normalizeSpecialSaleSetting(raw, monthKey = '') {
+function specialSaleMonthlyTotalsFromRaw(raw, monthKey = '') {
   if (!raw || typeof raw !== 'object') return null
   const o = /** @type {Record<string, unknown>} */ (raw)
-
   if (o.months && typeof o.months === 'object') {
-    const months = /** @type {Record<string, unknown>} */ (o.months)
-    const mk = /^\d{4}-\d{2}$/.test(monthKey) ? monthKey : ''
-    const pickKey =
-      mk && months[mk]
-        ? mk
-        : Object.keys(months).sort().pop() || ''
-    const bucket = pickKey ? months[pickKey] : null
-    if (bucket && typeof bucket === 'object') {
-      const entries = /** @type {{ entries?: unknown[] }} */ (bucket).entries
-      if (Array.isArray(entries) && entries.length) return { entries }
+    const flat = {}
+    for (const [mk, bucket] of Object.entries(
+      /** @type {Record<string, unknown>} */ (o.months),
+    )) {
+      const entries =
+        bucket && typeof bucket === 'object' && Array.isArray(
+          /** @type {{ entries?: unknown[] }} */ (bucket).entries,
+        )
+          ? /** @type {{ entries: unknown[] }} */ (bucket).entries
+          : Array.isArray(bucket)
+            ? bucket
+            : []
+      flat[mk] = entries
     }
-    return { entries: [] }
+    return buildSpecialSaleMonthlyTotals(flat)
   }
-
-  if (Array.isArray(o.entries) && o.entries.length) {
-    return { entries: o.entries }
-  }
-  if (o.totalSales || o.margin || o.marginRate) {
-    return {
-      entries: [
-        {
-          name: '특판',
-          sales: o.totalSales ?? '',
-          margin: o.margin ?? '',
-        },
-      ],
-    }
+  if (Array.isArray(o.entries) && monthKey) {
+    return buildSpecialSaleMonthlyTotals({ [monthKey]: o.entries })
   }
   return null
 }
 
-function resolveExportMonthKey(filterObj = {}) {
+function resolveExportMonthKey(filterObj) {
   const y = String(filterObj.year || '').trim()
   const mo = String(filterObj.month || '').trim()
   if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
@@ -164,7 +177,55 @@ function resolveExportMonthKey(filterObj = {}) {
   }
   const to = String(filterObj.dateTo || '').trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(to)) return to.slice(0, 7)
+  const from = String(filterObj.dateFrom || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from)) return from.slice(0, 7)
   return ''
+}
+
+/** 전월 필터 (YYYY-MM → dateFrom/dateTo/year/month) */
+function filtersForPrevExportMonth(filterObj, exportMonthKey) {
+  const prevMk = addMonthsToMonthKey(exportMonthKey, -1)
+  if (!prevMk) return null
+  const [y, m] = prevMk.split('-')
+  const lastDay = new Date(Number(y), Number(m), 0).getDate()
+  return {
+    ...filterObj,
+    dateFrom: `${prevMk}-01`,
+    dateTo: `${prevMk}-${String(lastDay).padStart(2, '0')}`,
+    year: y,
+    month: String(Number(m)),
+    platform: '',
+    salesMethod: '',
+  }
+}
+
+/**
+ * 전월 통합 세그먼트 KPI 행 — 대시보드 by-segment 전월과 동일 SoT
+ * (records 브랜드 DoD 폴백은 PG 행 분류 누락으로 0이 될 수 있음)
+ */
+function buildPrevMonthCombinedSegmentRows(
+  allRecords,
+  filterObj,
+  exportMonthKey,
+  manualAdByChannel,
+  specialSaleRaw,
+  manualExpenseRaw = null,
+) {
+  const prevFilters = filtersForPrevExportMonth(filterObj, exportMonthKey)
+  if (!prevFilters) return []
+  const prevMk = addMonthsToMonthKey(exportMonthKey, -1)
+  const prevRecords = applyKpiDetailFilters(
+    applyRecordFilters(allRecords || [], 'detail', prevFilters),
+    prevFilters,
+  )
+  const prevSpecialSale = pickSpecialSaleSettingForMonth(specialSaleRaw, prevMk)
+  const prevExpense = pickManualExpenseSettingForMonth(manualExpenseRaw, prevMk)
+  const prevCtx = {
+    ...prevFilters,
+    specialSale: prevSpecialSale,
+    manualExpense: prevExpense,
+  }
+  return buildKpiSplitRowsForChannel('통합', prevRecords, manualAdByChannel, prevCtx)
 }
 
 function buildManualAdByChannel(scope) {
@@ -199,7 +260,15 @@ export async function loadExportPayload(query = {}) {
     if (combinedIncludesPowerPrice(scope)) {
       powerPriceStore = await getSettingData(POWER_PRICE_SCOPE, 'power_price')
     }
-    ownMallStore = await getSettingData(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+  }
+  if (
+    combined ||
+    scope === 'company_b' ||
+    scope === 'company_b_monthly'
+  ) {
+    ownMallStore = await resolveOwnMallStoreForKpi(
+      await getSettingData(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND),
+    )
   }
   if (scope === 'platform' || scope === 'platform_monthly' || combined) {
     coupang1pStore = await getSettingData(COUPANG_1P_ROCKET_SCOPE, 'coupang_1p_rocket')
@@ -209,6 +278,11 @@ export async function loadExportPayload(query = {}) {
     ownMallStore,
     coupang1pStore,
   })
+
+  const sqlWindow = exportSqlFilters(filters)
+  const exportWindowFrom = sqlWindow.from || filters.from || ''
+  const exportWindowTo = filters.to || ''
+  allRecords = trimRecordsToExportWindow(allRecords, exportWindowFrom, exportWindowTo)
 
   if (!allRecords.length) {
     const err = new Error('export할 데이터가 없습니다.')
@@ -285,45 +359,57 @@ export async function loadExportPayload(query = {}) {
     )
   }
 
-  const specialSaleOverride = parseSettingOverride(query.special_sale)
-  const combinedCommentsOverride = parseSettingOverride(query.combined_comments)
-  const specialSaleRaw = combined
-    ? (specialSaleOverride ??
-      (await getSettingData(specialSaleScopeFor(scope), 'special_sale')))
+  // 특판 수기는 월별 통합 엑셀에만 포함. 기간(일별) 다운로드에는 넣지 않음.
+  const includeMonthlyExtras = combined && isMonthlyScope(scope)
+  const exportMonthKey = resolveExportMonthKey(filterObj)
+  const specialSaleOverride = includeMonthlyExtras
+    ? parseSettingOverride(query.special_sale)
     : null
-  const specialSale = normalizeSpecialSaleSetting(specialSaleRaw, resolveExportMonthKey(filterObj))
-  let combinedComments = null
-  if (combined) {
-    if (combinedCommentsOverride) {
-      combinedComments = combinedCommentsOverride
-    } else {
-      const raw =
-        (await getSettingData(COMBINED_COMMENTS_SETTING_SCOPE, COMBINED_COMMENTS_SETTING_KIND)) ||
-        (await getSettingData('combined_daily', COMBINED_COMMENTS_SETTING_KIND))
-      const store = normalizeCombinedCommentsStore(raw)
-      const days = listCombinedCommentsInRange(
-        store.byDate,
-        filterObj.dateFrom || '',
-        filterObj.dateTo || '',
-      )
-      combinedComments = {
-        labels: store.labels,
-        byDate: store.byDate,
-        days:
-          filterObj.dateFrom &&
-          filterObj.dateTo &&
-          filterObj.dateFrom === filterObj.dateTo &&
-          !days.length
-            ? [
-                {
-                  date: filterObj.dateFrom,
-                  comments: ['', '', '', ''],
-                },
-              ]
-            : days,
-      }
-    }
-  }
+  const specialSaleDb = includeMonthlyExtras
+    ? await getSettingData(specialSaleScopeFor(scope), 'special_sale')
+    : null
+  const specialSaleRaw = includeMonthlyExtras
+    ? mergeSpecialSaleSettingRaw(specialSaleDb, specialSaleOverride, exportMonthKey)
+    : null
+  const specialSale = includeMonthlyExtras
+    ? pickSpecialSaleSettingForMonth(specialSaleRaw, exportMonthKey)
+    : null
+  const specialSaleByMonth = includeMonthlyExtras
+    ? specialSaleMonthlyTotalsFromRaw(specialSaleRaw, exportMonthKey)
+    : null
+
+  const expenseOverride = includeMonthlyExtras
+    ? parseSettingOverride(query.manual_expense)
+    : null
+  const expenseDb = includeMonthlyExtras
+    ? await getSettingData(specialSaleScopeFor(scope), 'manual_expense')
+    : null
+  const expenseRaw = includeMonthlyExtras
+    ? mergeManualExpenseSettingRaw(expenseDb, expenseOverride, exportMonthKey)
+    : null
+  const manualExpense = includeMonthlyExtras
+    ? pickManualExpenseSettingForMonth(expenseRaw, exportMonthKey)
+    : null
+
+  const channelManualAd =
+    manualAdByChannel || [
+      { label: channel?.tabLabel || '외부 광고', entries: manualAdEntries },
+    ]
+
+  // 전월 세그먼트 — 대시보드 전월대비와 동일 (엑셀 전월 0원 방지)
+  const serverPrevMonthPlatformKpiRows =
+    includeMonthlyExtras && exportMonthKey
+      ? buildPrevMonthCombinedSegmentRows(
+          allRecords,
+          filterObj,
+          exportMonthKey,
+          channelManualAd,
+          specialSaleRaw,
+          expenseRaw,
+        )
+      : []
+
+  const combinedComments = null
   const profitLossTemplate = combined
     ? await getSettingData(PROFIT_LOSS_TEMPLATE_SCOPE, PROFIT_LOSS_TEMPLATE_KIND)
     : null
@@ -340,16 +426,18 @@ export async function loadExportPayload(query = {}) {
     filters: filterObj,
     channelLabel: combined ? '통합' : channel?.tabLabel || '매출',
     isCombined: combined,
-    manualAdByChannel: manualAdByChannel || [
-      { label: channel?.tabLabel || '외부 광고', entries: manualAdEntries },
-    ],
+    manualAdByChannel: channelManualAd,
     manualAdEntries,
     specialSale,
+    specialSaleByMonth,
+    manualExpense,
     combinedComments,
     hiddenKpiKeys,
     profitLossTemplate,
     uploads: [],
     selectedUploadIds: [],
+    summarySheetOnly: isMonthlyScope(scope),
+    serverPrevMonthPlatformKpiRows,
   }
 }
 

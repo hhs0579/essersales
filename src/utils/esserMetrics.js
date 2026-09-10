@@ -8,7 +8,7 @@ import {
   WEEKDAY_LABELS,
 } from './dateParse.js'
 import { getRecordDate, resolveRecordDateForAggregation } from './recordFilters.js'
-import { getSalesMethod, SMARTSTORE_SALES_METHODS, baseSalesMethodFromGroupLabel, salesMethodGroupLabel } from './salesMethodDetect.js'
+import { getSalesMethod, SMARTSTORE_SALES_METHODS, salesMethodGroupLabel } from './salesMethodDetect.js'
 import { resolveRecordPlatform } from './platformDetect.js'
 import { isReturnRecord } from './transactionType.js'
 import { applyOwnMallCardFeeToNetProfit } from '../config/ownMall.js'
@@ -104,10 +104,6 @@ function dayBucketMetaFromRow(row) {
     return { key: label, label, sortTime: 0 }
   }
   return null
-}
-
-function dayKeyFromRow(row) {
-  return dayBucketMetaFromRow(row)?.key ?? null
 }
 
 /** @param {string} fromYmd @param {string} toYmd @returns {string[]} */
@@ -221,24 +217,21 @@ function addProductMetricsToBucket(bucket, row) {
   bucket.totalCost += v.totalCost
 }
 
-/** 엑셀 합계 행 — 광고비·광고매출만 (매출은 상품 행 합산, 로켓+판매자 이중 합산 방지) */
-function addSheetAdOnlyToBucket(bucket, row) {
-  const v = esserRowValues(row)
-  bucket.adSpend += v.adSpend
-  bucket.adSales += v.adSales
-}
-
 export function hasEsserSheetTotalRows(rows) {
   return (rows || []).some((r) => !isReturnRecord(r) && isEsserSheetTotalRecord(r))
 }
 
+function sheetUploadKey(row) {
+  return row?.uploadId || row?.sourceFileName || '__single__'
+}
+
 /** 파일(upload)당 열 합계 행 1개 — 헤더 직하 우선 */
-function dedupeSheetTotalMetrics(rows) {
+function dedupeSheetTotalsByUpload(rows) {
   const sheetRows = (rows || []).filter((r) => !isReturnRecord(r) && isEsserSheetTotalRecord(r))
   /** @type {Map<string, { v: ReturnType<typeof esserRowValues>, kind: string }>} */
   const byUpload = new Map()
   for (const r of sheetRows) {
-    const key = r.uploadId || r.sourceFileName || '__single__'
+    const key = sheetUploadKey(r)
     const v = esserRowValues(r)
     const kind = r.sheetTotalKind || 'footer'
     const prev = byUpload.get(key)
@@ -249,7 +242,11 @@ function dedupeSheetTotalMetrics(rows) {
     if (prev.kind === 'header') continue
     if (kind === 'header') byUpload.set(key, { v, kind })
   }
-  return [...byUpload.values()].map((x) => x.v)
+  return byUpload
+}
+
+function dedupeSheetTotalMetrics(rows) {
+  return [...dedupeSheetTotalsByUpload(rows).values()].map((x) => x.v)
 }
 
 function applyMetricsToBucket(bucket, metrics) {
@@ -259,6 +256,37 @@ function applyMetricsToBucket(bucket, metrics) {
   bucket.totalCost += metrics.totalCost
   bucket.adSpend += metrics.adSpend
   bucket.adSales += metrics.adSales
+}
+
+/**
+ * 업로드(파일)당: 엑셀 합계 행이 있으면 그 행 값만 사용. 없을 때만 상품 행 합.
+ * (원가·마진·광고 포함 — 합계 행에 비어 있으면 0. 스스 원가 역산은 deriveEsserProfitKpis)
+ */
+export function accumulateEsserPreferSheetTotals(rows) {
+  const list = rows || []
+  const byUpload = dedupeSheetTotalsByUpload(list)
+  /** @type {Map<string, object[]>} */
+  const productsByUpload = new Map()
+  for (const r of list) {
+    if (isReturnRecord(r) || isEsserSheetTotalRecord(r)) continue
+    const key = sheetUploadKey(r)
+    if (!productsByUpload.has(key)) productsByUpload.set(key, [])
+    productsByUpload.get(key).push(r)
+  }
+
+  const keys = new Set([...productsByUpload.keys(), ...byUpload.keys()])
+  const bucket = emptyBucket()
+  for (const key of keys) {
+    const sheet = byUpload.get(key)?.v
+    if (sheet) {
+      applyMetricsToBucket(bucket, sheet)
+      continue
+    }
+    for (const r of productsByUpload.get(key) || []) {
+      applyMetricsToBucket(bucket, esserRowValues(r))
+    }
+  }
+  return bucket
 }
 
 /** @deprecated sumEsserAdFromRows — sumEsserSheetMetricsFromRows 사용 */
@@ -279,36 +307,14 @@ export function sumEsserSheetAdFromRows(rows) {
   return acc
 }
 
-/** @deprecated 매출·순이익에 쓰지 말 것 — sumEsserSheetAdFromRows */
+/** @deprecated 광고만 — 매출·마진은 summarizeEsserKpis(합계 행 우선) 사용 */
 export function sumEsserSheetMetricsFromRows(rows) {
   return sumEsserSheetAdFromRows(rows)
 }
 
-function sumEsserProductMetricsFromRows(rows) {
-  const acc = emptyBucket()
-  for (const r of rows || []) {
-    if (isReturnRecord(r) || isEsserSheetTotalRecord(r)) continue
-    applyMetricsToBucket(acc, esserRowValues(r))
-  }
-  return acc
-}
-
-function applyDayAdFallback(bucket, dayKey, rows) {
-  if (bucket.adSpend > 0 || bucket.adSales > 0) return
-  for (const r of rows) {
-    if (isReturnRecord(r) || isEsserSheetTotalRecord(r)) continue
-    if (dayKeyFromRow(r) !== dayKey) continue
-    const v = esserRowValues(r)
-    bucket.adSpend += v.adSpend
-    bucket.adSales += v.adSales
-  }
-}
-
+/** 상품 옵션·판매방식 등 세부분해 — 합계 행 제외(상품 행만) */
 function addBucket(bucket, row) {
-  if (isEsserSheetTotalRecord(row)) {
-    addSheetAdOnlyToBucket(bucket, row)
-    return
-  }
+  if (isEsserSheetTotalRecord(row)) return
   addProductMetricsToBucket(bucket, row)
 }
 
@@ -356,13 +362,7 @@ export function reconcileEsserTotals(rows) {
 }
 
 export function summarizeEsserKpis(rows) {
-  const bucket = sumEsserProductMetricsFromRows(rows)
-  const sheetAd = sumEsserSheetAdFromRows(rows)
-  if (sheetAd) {
-    bucket.adSpend = sheetAd.adSpend
-    bucket.adSales = sheetAd.adSales
-  }
-  return finalizeEsserBucket(bucket)
+  return finalizeEsserBucket(accumulateEsserPreferSheetTotals(rows))
 }
 
 /** 반품·취소 건만 절대값으로 합산 (매출 KPI와 분리) */
@@ -409,23 +409,23 @@ export function chartValueFromBucket(bucket, metricKey) {
   }
 }
 
-/** 일별 대시보드 — 매출·마진·원가 (상품 행 합) */
+/** 일별 대시보드 — 매출·마진·원가 (엑셀 합계 행 우선) */
 export const ESSER_PROFIT_KPI_CARDS = [
   {
     key: 'sales',
     label: '매출',
-    hint: '상품별 매출 합 (반품 제외). 로켓·판매자 합계 칸은 더하지 않음',
+    hint: '엑셀 합계 행 매출(파일당 1행, 헤더 우선). 없으면 상품별 합(반품 제외)',
   },
-  { key: 'netProfit', label: '마진', hint: '상품별 순이익(마진) 합' },
+  { key: 'netProfit', label: '마진', hint: '엑셀 합계 행 마진 우선, 없으면 상품별 순이익 합' },
   { key: 'netProfitRate', label: '마진율', hint: '마진 ÷ 매출 × 100 (%)' },
-  { key: 'totalCost', label: '총 원가', hint: '상품별 원가 합' },
+  { key: 'totalCost', label: '총 원가', hint: '합계 행 있으면 합계 원가 칸. 없으면 상품 원가 합. 스스만 매출−마진 역산' },
   { key: 'costRate', label: '원가율', hint: '총 원가 ÷ 매출 × 100 (%)' },
   { key: 'aov', label: '객단가', hint: '매출 ÷ 판매 수량' },
 ]
 
 /** 일별 대시보드 — 광고·수량 */
 export const ESSER_AD_KPI_CARDS = [
-  { key: 'salesQty', label: '판매 수량', hint: '상품별 판매수량 합' },
+  { key: 'salesQty', label: '판매 수량', hint: '엑셀 합계 행 수량 우선, 없으면 상품별 합' },
   {
     key: 'adSpend',
     label: '광고비',
@@ -454,8 +454,14 @@ export function resolveKpiMarginForCostEstimate(kpi, productKpi) {
   const sales = kpi?.sales || productKpi?.sales || 0
   if (!(sales > 0)) return 0
 
-  const src = productKpi || kpi
+  // 합계 행 매출과 상품 합 매출이 다르면 마진도 KPI(합계 행) 기준 — 상품 마진 혼용 시 원가 왜곡
+  const salesMismatch =
+    productKpi && Math.abs((kpi?.sales || 0) - (productKpi?.sales || 0)) > 1
+  const src = salesMismatch ? kpi : productKpi || kpi
   let margin = src?.netProfit || 0
+  if (!margin && !salesMismatch && kpi?.netProfit) {
+    margin = kpi.netProfit
+  }
   if (!margin) {
     const rate =
       src?.netProfitRate ??
@@ -479,9 +485,10 @@ export function deriveEsserProfitKpis(kpi, options = {}) {
   const netProfitRate =
     base.netProfitRate ?? (sales > 0 ? (netProfit / sales) * 100 : 0)
 
+  // 마진≤0이면 매출−마진 역산이 원가>매출(원가율 100%+)이 됨 — 역산하지 않음
   if (options.estimateCostFromMargin && sales > 0) {
     const margin = resolveKpiMarginForCostEstimate(base, options.productKpi)
-    if (margin) {
+    if (margin > 0) {
       totalCost = Math.max(0, sales - margin)
     }
   }
@@ -498,26 +505,47 @@ export function deriveEsserProfitKpis(kpi, options = {}) {
   }
 }
 
-/** 스마트스토어 판매방식(일반배송·N배송) — KPI·집계표 원가 역산 대상 */
-export function shouldEstimateSalesMethodCostFromMargin(label) {
-  return SMARTSTORE_SALES_METHODS.includes(baseSalesMethodFromGroupLabel(label))
+/**
+ * 스마트스토어만 매출−마진 원가 역산.
+ * 주의: 쿠팡도 빅셀에 「일반배송」이 있어 base method만 보면 쿠팡까지 역산됨 → 플랫폼 접두 필수.
+ */
+export function shouldEstimateSalesMethodCostFromMargin(label, group = null) {
+  const s = String(label || '').trim()
+  if (!s) return false
+  if (s.startsWith('쿠팡') || s.startsWith('자사몰') || s === '파워프라이스') return false
+  if (s.startsWith('스마트스토어')) return true
+  if (group?.length) {
+    let hasSs = false
+    let hasCoupang = false
+    for (const r of group) {
+      const p = resolveRecordPlatform(r)
+      if (p === '스마트스토어') hasSs = true
+      if (p === '쿠팡') hasCoupang = true
+    }
+    if (hasCoupang) return false
+    if (hasSs) return true
+  }
+  // 플랫폼 접두 없는 단독 라벨(일반배송·N배송)만 스스로 간주
+  return SMARTSTORE_SALES_METHODS.includes(s)
 }
 
 /**
- * 그룹 집계 원가 — 스마트스토어 판매방식은 매출−마진 임시 역산 (대시보드 KPI와 동일)
+ * 그룹 집계 원가 — 스마트스토어만 매출−마진 역산. 쿠팡은 기입 원가 그대로.
  * @param {string} label
  * @param {object[]} group
  * @param {object} kpi summarizeEsserKpis(group)
  * @param {number} [rawTotalCost] summarizeKpis(group).totalCost
  */
 export function resolveGroupTotalCost(label, group, kpi, rawTotalCost = 0) {
-  if (!shouldEstimateSalesMethodCostFromMargin(label)) {
-    return rawTotalCost || 0
+  // 매출·원가 동일 SoT — summarizeKpis 원가와 summarizeEsserKpis 매출을 섞지 않음
+  const baseCost = kpi?.totalCost || rawTotalCost || 0
+  if (!shouldEstimateSalesMethodCostFromMargin(label, group)) {
+    return baseCost
   }
   const productRows = (group || []).filter((r) => !isEsserSheetTotalRecord(r))
   const productKpi = summarizeEsserKpis(productRows)
   return deriveEsserProfitKpis(
-    { ...(kpi || {}), totalCost: rawTotalCost || 0 },
+    { ...(kpi || {}), totalCost: baseCost },
     { estimateCostFromMargin: true, productKpi },
   ).totalCost
 }
@@ -614,56 +642,30 @@ export function buildEsserDailyTabRows(details) {
 }
 
 export function aggregateEsserByDay(rows) {
+  /** @type {Map<string, { label: string, sortTime: number, rows: object[] }>} */
   const map = new Map()
-  /** @type {Map<string, { adSpend: number, adSales: number, kind: string }>} */
-  const sheetAdByDayUpload = new Map()
-
-  for (const row of rows) {
+  for (const row of rows || []) {
     if (isReturnRecord(row)) continue
     const meta = dayBucketMetaFromRow(row)
     if (!meta) continue
-    const { key, label, sortTime } = meta
-    if (!map.has(key)) {
-      map.set(key, { label, sortTime, ...emptyBucket() })
+    if (!map.has(meta.key)) {
+      map.set(meta.key, { label: meta.label, sortTime: meta.sortTime, rows: [] })
     }
-    if (isEsserSheetTotalRecord(row)) {
-      const uk = `${key}\0${row.uploadId || row.sourceFileName || '__single__'}`
-      const v = esserRowValues(row)
-      const kind = row.sheetTotalKind || 'footer'
-      const prev = sheetAdByDayUpload.get(uk)
-      if (!prev) {
-        sheetAdByDayUpload.set(uk, { adSpend: v.adSpend, adSales: v.adSales, kind })
-      } else if (prev.kind !== 'header' && kind === 'header') {
-        sheetAdByDayUpload.set(uk, { adSpend: v.adSpend, adSales: v.adSales, kind })
-      }
-    } else {
-      addProductMetricsToBucket(map.get(key), row)
-    }
-  }
-
-  for (const [uk, ad] of sheetAdByDayUpload) {
-    const dayKey = uk.split('\0')[0]
-    const bucket = map.get(dayKey)
-    if (!bucket) continue
-    bucket.adSpend += ad.adSpend
-    bucket.adSales += ad.adSales
-  }
-
-  for (const [key, bucket] of map) {
-    applyDayAdFallback(bucket, key, rows)
+    map.get(meta.key).rows.push(row)
   }
   return [...map.values()]
     .sort((a, b) => a.sortTime - b.sortTime)
     .map((x) => ({
-      ...finalizeEsserBucket(x),
+      ...summarizeEsserKpis(x.rows),
       label: x.label,
       sortTime: x.sortTime,
     }))
 }
 
 export function aggregateEsserByWeek(rows, filterYear) {
+  /** @type {Map<string, { label: string, sortTime: number, rows: object[] }>} */
   const map = new Map()
-  for (const row of rows) {
+  for (const row of rows || []) {
     if (isReturnRecord(row)) continue
     const p = parseSalesDate(getRecordDate(row))
     if (!p) continue
@@ -673,83 +675,84 @@ export function aggregateEsserByWeek(rows, filterYear) {
       map.set(w.key, {
         label: `${w.key} (${w.monday.getMonth() + 1}/${w.monday.getDate()}~${w.sunday.getMonth() + 1}/${w.sunday.getDate()})`,
         sortTime: w.sortTime,
-        ...emptyBucket(),
+        rows: [],
       })
     }
-    addBucket(map.get(w.key), row)
+    map.get(w.key).rows.push(row)
   }
   return [...map.values()]
     .sort((a, b) => a.sortTime - b.sortTime)
-    .map((x) => ({ ...finalizeEsserBucket(x), label: x.label, sortTime: x.sortTime }))
+    .map((x) => ({ ...summarizeEsserKpis(x.rows), label: x.label, sortTime: x.sortTime }))
 }
 
 export function aggregateEsserByMonth(rows, filterYear) {
+  /** @type {Map<number, { label: string, sortTime: number, rows: object[] }>} */
   const map = new Map()
-  for (const row of rows) {
+  for (const row of rows || []) {
     if (isReturnRecord(row)) continue
     const p = parseSalesDate(getRecordDate(row))
     if (!p) continue
     if (filterYear && String(p.year) !== String(filterYear)) continue
     if (!map.has(p.month)) {
-      map.set(p.month, { label: `${p.month}월`, month: p.month, sortTime: p.month, ...emptyBucket() })
+      map.set(p.month, { label: `${p.month}월`, sortTime: p.month, rows: [] })
     }
-    addBucket(map.get(p.month), row)
+    map.get(p.month).rows.push(row)
   }
   return [...map.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([, x]) => {
-      const b = finalizeEsserBucket(x)
-      return { ...b, label: x.label, sortTime: x.sortTime }
-    })
+    .map(([, x]) => ({ ...summarizeEsserKpis(x.rows), label: x.label, sortTime: x.sortTime }))
 }
 
 export function aggregateEsserByYear(rows) {
+  /** @type {Map<string, { label: string, sortTime: number, rows: object[] }>} */
   const map = new Map()
-  for (const row of rows) {
+  for (const row of rows || []) {
     if (isReturnRecord(row)) continue
     const p = parseSalesDate(getRecordDate(row))
     if (!p) continue
     const key = String(p.year)
     if (!map.has(key)) {
-      map.set(key, { label: `${key}년`, sortTime: p.year, ...emptyBucket() })
+      map.set(key, { label: `${key}년`, sortTime: p.year, rows: [] })
     }
-    addBucket(map.get(key), row)
+    map.get(key).rows.push(row)
   }
   return [...map.values()]
     .sort((a, b) => a.sortTime - b.sortTime)
-    .map((x) => ({ ...finalizeEsserBucket(x), label: x.label, sortTime: x.sortTime }))
+    .map((x) => ({ ...summarizeEsserKpis(x.rows), label: x.label, sortTime: x.sortTime }))
 }
 
 export function aggregateEsserByWeekday(rows) {
+  /** @type {Map<number, { label: string, sortTime: number, rows: object[] }>} */
   const map = new Map()
   for (let d = 0; d < 7; d++) {
-    map.set(d, { label: WEEKDAY_LABELS[d], dayOfWeek: d, sortTime: d, ...emptyBucket() })
+    map.set(d, { label: WEEKDAY_LABELS[d], sortTime: d, rows: [] })
   }
-  for (const row of rows) {
+  for (const row of rows || []) {
     if (isReturnRecord(row)) continue
     const p = parseSalesDate(getRecordDate(row))
     if (!p) continue
-    addBucket(map.get(p.dayOfWeek), row)
+    map.get(p.dayOfWeek).rows.push(row)
   }
   return [...map.values()].map((x) => ({
-    ...finalizeEsserBucket(x),
+    ...summarizeEsserKpis(x.rows),
     label: x.label,
     sortTime: x.sortTime,
   }))
 }
 
 export function aggregateEsserByChannel(rows, metricKey) {
+  /** @type {Map<string, object[]>} */
   const map = new Map()
-  for (const row of rows) {
+  for (const row of rows || []) {
     if (isReturnRecord(row)) continue
     const label = resolveRecordPlatform(row)
-    if (!map.has(label)) map.set(label, { label, ...emptyBucket() })
-    addBucket(map.get(label), row)
+    if (!map.has(label)) map.set(label, [])
+    map.get(label).push(row)
   }
-  return [...map.values()]
-    .map((x) => ({
-      label: x.label,
-      value: chartValueFromBucket(finalizeEsserBucket(x), metricKey),
+  return [...map.entries()]
+    .map(([label, group]) => ({
+      label,
+      value: chartValueFromBucket(summarizeEsserKpis(group), metricKey),
     }))
     .sort((a, b) => b.value - a.value)
 }

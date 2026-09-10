@@ -80,6 +80,15 @@ export function detectSalesMethodFromFileName(fileName) {
   return ''
 }
 
+/** 쿠팡 로켓그로스 (판매자배송과 구분) */
+export function isCoupangRocketGrowthMethod(method) {
+  const n = String(method || '')
+    .toLowerCase()
+    .replace(/\s/g, '')
+  if (!n) return false
+  return n === '로켓그로스' || n.includes('로켓그로스') || n.includes('rocketgrowth') || n.includes('rocket_growth')
+}
+
 /** 전각·특수문자 정리 후 비교용 */
 function normDeliveryText(value) {
   return String(value ?? '')

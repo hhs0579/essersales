@@ -23,7 +23,7 @@
     "migrate:pg": "node infra/scripts/migrate-sqlite-to-pg.mjs --execute",
     "verify:pg": "node infra/scripts/verify-pg-migration.mjs",
     "compare:read-api": "node infra/scripts/compare-sqlite-pg-read-api.mjs",
-    "regression:phase-1-5": "node infra/scripts/phase-1-5-regression.mjs",
+    "regression:phase-1-table": "node infra/scripts/phase-1-table-excel-regression.mjs",
     "regression:phase-2-1": "node infra/scripts/phase-2-1-kpi-api-regression.mjs",
     "regression:phase-2-2": "node infra/scripts/phase-2-2-kpi-api-regression.mjs",
     "regression:phase-2-3": "node infra/scripts/phase-2-3-lazy-manual-ads-regression.mjs",
@@ -35,7 +35,9 @@
     "regression:phase-3-4a": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs",
     "regression:full-pg": "node infra/scripts/regression-full-pg.mjs",
     "smoke:phase-3-4a": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs",
-    "smoke:full-pg": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs"
+    "smoke:full-pg": "node infra/scripts/phase-3-4a-full-pg-ui-smoke.mjs",
+    "verify:combined-kpi": "node scripts/verify-combined-kpi-consistency.mjs",
+    "verify:integrated-excel": "node scripts/verify-integrated-excel-sections.mjs"
   },
   "dependencies": {
     "chart.js": "^4.5.1",

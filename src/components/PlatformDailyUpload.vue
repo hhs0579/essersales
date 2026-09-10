@@ -2,7 +2,6 @@
 import { computed, ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import { parsePlatformDailyInWorker } from '../utils/parseExcelInWorker.js'
 import { OWN_MALL_AIMWEB_UPLOAD_ERROR } from '../utils/ownMallSalesParser.js'
 import {
   deleteUploadAndRecords,
@@ -15,6 +14,7 @@ import {
   normalizePlatformLabel,
   resolveUploadPlatform,
 } from '../utils/platformDetect.js'
+import { formatPlatformUploadSuccess } from '../utils/uploadSuccessMessage.js'
 
 const props = defineProps({
   /** DB uploads.upload_kind — 채널별 분리 (platform_daily | sales_daily_b 등) */
@@ -58,45 +58,14 @@ async function onFilesSelected(fileList) {
     let total = 0
     for (const [idx, file] of fileList.entries()) {
       const filePrefix = fileList.length > 1 ? `[${idx + 1}/${fileList.length}] ` : ''
-      const fromName = detectPlatformFromFileName(file.name)
+      const fileName = file.name
+      progressMessage.value = `${filePrefix}파일 선택 완료 (${fileName})`
+      await yieldTick()
+
+      const fromName = detectPlatformFromFileName(fileName)
       if (fromName) platform.value = fromName
+      const resolvedPlatform = resolveUploadPlatform(fileName, platform.value, [])
 
-      progressMessage.value = `${filePrefix}엑셀 파일 파싱 및 포맷 검증 중...`
-      await yieldTick()
-
-      const {
-        fileName,
-        platform: p,
-        businessDate,
-        details,
-        skipped,
-        skippedSummary = 0,
-        skippedNoDate = 0,
-        dateRangeHint = '',
-        format,
-        salesMethod,
-        emptyHint = '',
-      } = await parsePlatformDailyInWorker(file, platform.value)
-
-      progressMessage.value = `${filePrefix}데이터 정제 및 분석 중...`
-      await yieldTick()
-
-      const resolvedPlatform = resolveUploadPlatform(fileName, p, details)
-      const methodPreview = [
-        ...new Set(
-          details
-            .filter((d) => !d.isEsserSheetTotal)
-            .map((d) => d.salesMethod)
-            .filter(Boolean),
-        ),
-      ]
-      if (!details.length) {
-        let hint = emptyHint || '컬럼명·파일명 날짜를 확인하세요.'
-        if (!emptyHint && skippedNoDate > 0) {
-          hint = `날짜를 읽지 못한 행 ${skippedNoDate}건. 파일명(일자20260601 등) 또는 엑셀 날짜 열을 확인하세요.`
-        }
-        throw new Error(`「${fileName}」에서 저장할 행을 찾지 못했습니다. ${hint}`)
-      }
       progressMessage.value = `${filePrefix}기존 중복 데이터 검사 중...`
       await yieldTick()
 
@@ -108,38 +77,31 @@ async function onFilesSelected(fileList) {
         await deleteUploadAndRecords(u.id)
       }
 
-      progressMessage.value = `${filePrefix}서버 DB에 대용량 데이터 저장 중...`
+      progressMessage.value = `${filePrefix}업로드 중...`
       await yieldTick()
+      progressMessage.value = `${filePrefix}서버 처리 중...`
 
-      const { count } = await savePlatformDailyUpload({
+      const { count, parseMeta, salesMethod, platform: savedPlatform } = await savePlatformDailyUpload({
         file,
         fileName,
         platform: resolvedPlatform,
-        businessDate,
-        details,
-        salesMethod: salesMethod || methodPreview[0] || '',
         uploadKind: props.uploadKind,
       })
       total += count
-      const skipParts = []
-      if (skipped > 0) skipParts.push(`미저장 ${skipped}행`)
-      if (skippedSummary > 0) skipParts.push(`합계행 제외 ${skippedSummary}`)
-      if (skippedNoDate > 0) skipParts.push(`날짜없음 ${skippedNoDate}행`)
-      const skipNote = skipParts.length ? ` (${skipParts.join(', ')})` : ''
-      const formatLabel = format === 'coupang_esser' ? ' · 빅셀 매출분석' : ''
-      const methodLabel =
-        methodPreview.length > 0
-          ? ` · ${methodPreview.join('/')}`
-          : salesMethod
-            ? ` · ${salesMethod}`
-            : ''
-      const rangeLabel = dateRangeHint ? ` · 기간 ${dateRangeHint}` : ''
-      success.value = `${fileList.length}개 파일 · ${resolvedPlatform}${formatLabel}${methodLabel}${rangeLabel} · 총 ${total}건 저장${skipNote}`
+      const displayPlatform = savedPlatform || parseMeta?.platform || resolvedPlatform
+      success.value = formatPlatformUploadSuccess({
+        fileCount: fileList.length,
+        platform: displayPlatform,
+        parseMeta,
+        total,
+        kind: 'daily',
+        salesMethod,
+      })
       if (
-        resolvedPlatform &&
-        MARKETPLACE_PLATFORMS.includes(normalizePlatformLabel(resolvedPlatform))
+        displayPlatform &&
+        MARKETPLACE_PLATFORMS.includes(normalizePlatformLabel(displayPlatform))
       ) {
-        platform.value = normalizePlatformLabel(resolvedPlatform)
+        platform.value = normalizePlatformLabel(displayPlatform)
       }
     }
     emit('uploaded')

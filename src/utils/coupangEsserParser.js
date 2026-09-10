@@ -269,10 +269,11 @@ export function isCoupangEsserSummaryRow(m) {
  * 헤더 바로 아래(첫 데이터 행): 각 열 제목 밑 칸 = 그 열 합계 (상품ID 없음)
  * @param {object} m
  */
-export function isCoupangEsserHeaderTotalRow(m) {
+export function isCoupangEsserHeaderTotalRow(m, options = {}) {
   if (m.product_id || m.option_id) return false
   const name = String(m.product_name || '').trim()
   if (name && !isCoupangEsserSummaryRow(m)) return false
+  const allowZero = options.allowZeroSalesProducts === true
   return (
     parseAmount(m.sales) !== 0 ||
     parseAmount(m.sales_qty) !== 0 ||
@@ -280,23 +281,30 @@ export function isCoupangEsserHeaderTotalRow(m) {
     parseAmount(m.ad_sales) !== 0 ||
     parseAmount(m.net_profit) !== 0 ||
     parseAmount(m.sales_cost) !== 0 ||
-    isCoupangEsserSummaryRow(m)
+    isCoupangEsserSummaryRow(m) ||
+    // 사본느리만: 상품명·ID 없는 헤더 직하 칸 — 매출 0이어도 열 합계
+    (allowZero && !name)
   )
 }
 
 /** 헤더 직하 합계 행(0번) 또는 하단 합계/총합 행 */
-export function isCoupangEsserColumnTotalRow(m, rowIndex = -1) {
-  if (rowIndex === 0 && isCoupangEsserHeaderTotalRow(m)) return true
+export function isCoupangEsserColumnTotalRow(m, rowIndex = -1, options = {}) {
+  if (rowIndex === 0 && isCoupangEsserHeaderTotalRow(m, options)) return true
   return isCoupangEsserSummaryRow(m)
 }
 
-function hasSheetLevelMetrics(m) {
+function hasSheetLevelMetrics(m, options = {}) {
+  const name = String(m.product_name || '').trim()
+  const allowZero = options.allowZeroSalesProducts === true
   return (
     parseAmount(m.sales) !== 0 ||
     parseAmount(m.sales_qty) !== 0 ||
     parseAmount(m.ad_spend) !== 0 ||
     parseAmount(m.ad_sales) !== 0 ||
-    parseAmount(m.net_profit) !== 0
+    parseAmount(m.net_profit) !== 0 ||
+    isCoupangEsserSummaryRow(m) ||
+    // 사본느리만: 매출 0 합계 행·헤더 직하 빈 칸 보존
+    (allowZero && !name && !m.product_id && !m.option_id)
   )
 }
 
@@ -329,18 +337,55 @@ function formatMarginRate(raw, sales, margin) {
   return ''
 }
 
-/** 판매 0이어도 광고·손익 등 지표가 있으면 일별·KPI에 포함 */
-function hasEsserMeasurableActivity(m, qty, sales) {
+function hasEsserProductIdentity(m) {
+  return Boolean(
+    String(m.product_name || '').trim() ||
+      String(m.option_name || '').trim() ||
+      String(m.product_id || '').trim() ||
+      String(m.option_id || '').trim() ||
+      String(m.product_code || '').trim(),
+  )
+}
+
+/**
+ * 사본느리 채널 + 로켓그로스 파일명일 때만 매출 0 상품행 허용.
+ * (판매자배송·베스트하임에는 적용하지 않음)
+ */
+function resolveAllowZeroSalesProducts(fileName, options = {}) {
+  if (options.allowZeroSalesProducts !== true) return false
+  return detectSalesMethodFromFileName(fileName) === '로켓그로스'
+}
+
+function withResolvedZeroSalesOption(fileName, options = {}) {
+  return {
+    ...options,
+    allowZeroSalesProducts: resolveAllowZeroSalesProducts(fileName, options),
+  }
+}
+
+/**
+ * 판매 0이어도 광고·원가 등이 있으면 저장.
+ * allowZeroSalesProducts(사본느리·로켓그로스)일 때만 상품 식별만으로도 저장.
+ */
+function hasEsserMeasurableActivity(m, qty, sales, options = {}) {
   if (qty !== 0 || sales !== 0) return true
-  return (
-    parseAmount(m.ad_spend) > 0 ||
-    parseAmount(m.ad_sales) > 0 ||
-    parseAmount(m.ad_qty) > 0 ||
+  if (
+    parseAmount(m.ad_spend) !== 0 ||
+    parseAmount(m.ad_sales) !== 0 ||
+    parseAmount(m.ad_qty) !== 0 ||
     parseAmount(m.ad_profit) !== 0 ||
     parseAmount(m.ad_net_profit) !== 0 ||
     parseAmount(m.net_profit) !== 0 ||
-    parseAmount(m.gross_sales) > 0
-  )
+    parseAmount(m.gross_sales) !== 0 ||
+    parseAmount(m.sales_cost) !== 0 ||
+    parseAmount(m.cost_price) !== 0
+  ) {
+    return true
+  }
+  if (options.allowZeroSalesProducts === true) {
+    return hasEsserProductIdentity(m)
+  }
+  return false
 }
 
 /** 엑셀 합계 행 — 제목 밑·하단 합계 칸의 매출·광고·순이익 등 전체 저장 */
@@ -351,8 +396,9 @@ function coupangEsserSheetTotalToDetail(
   platform,
   salesMethod,
   sheetTotalKind = 'footer',
+  options = {},
 ) {
-  if (!hasSheetLevelMetrics(m)) return null
+  if (!hasSheetLevelMetrics(m, options)) return null
 
   let date = ''
   if (m.sale_date) {
@@ -418,6 +464,7 @@ function coupangEsserSheetTotalToPeriodDetail(
   platform,
   salesMethod,
   sheetTotalKind = 'footer',
+  options = {},
 ) {
   const base = coupangEsserSheetTotalToDetail(
     m,
@@ -426,6 +473,7 @@ function coupangEsserSheetTotalToPeriodDetail(
     platform,
     salesMethod,
     sheetTotalKind,
+    options,
   )
   if (!base) return null
   return {
@@ -437,12 +485,12 @@ function coupangEsserSheetTotalToPeriodDetail(
   }
 }
 
-function coupangEsserToDetail(m, fallbackDate, fileName, platform, salesMethod) {
-  if (isCoupangEsserColumnTotalRow(m)) return null
+function coupangEsserToDetail(m, fallbackDate, fileName, platform, salesMethod, options = {}) {
+  if (isCoupangEsserColumnTotalRow(m, -1, options)) return null
 
   const qty = parseAmount(m.sales_qty)
   const sales = parseAmount(m.sales)
-  if (!hasEsserMeasurableActivity(m, qty, sales)) return null
+  if (!hasEsserMeasurableActivity(m, qty, sales, options)) return null
 
   const productName =
     String(m.product_name || '').trim() ||
@@ -522,15 +570,16 @@ function coupangEsserToPeriodDetail(
   fileName,
   platform,
   salesMethod,
+  options = {},
 ) {
-  if (isCoupangEsserColumnTotalRow(m)) return null
+  if (isCoupangEsserColumnTotalRow(m, -1, options)) return null
 
   const productName = m.product_name || ''
   if (!productName) return null
 
   const qty = parseAmount(m.sales_qty)
   const sales = parseAmount(m.sales)
-  if (!hasEsserMeasurableActivity(m, qty, sales)) return null
+  if (!hasEsserMeasurableActivity(m, qty, sales, options)) return null
 
   const margin = parseAmount(m.net_profit)
   const totalCost = parseAmount(m.sales_cost)
@@ -591,7 +640,8 @@ function coupangEsserToPeriodDetail(
 /**
  * 쿠팡 에쎄르 기간 매출 (파일명 시작·종료일, 행에 날짜 열 없음)
  */
-export function parseCoupangEsserPeriod(fileName, headers, rows, platform = '쿠팡') {
+export function parseCoupangEsserPeriod(fileName, headers, rows, platform = '쿠팡', options = {}) {
+  options = withResolvedZeroSalesOption(fileName, options)
   const fallbackPlatform =
     detectPlatformFromFileName(fileName) || platform
   const spec = parseFilenameDateSpec(fileName)
@@ -614,7 +664,7 @@ export function parseCoupangEsserPeriod(fileName, headers, rows, platform = '쿠
   const rowCarry = { lastChannelKind: '', lastDeliveryMethod: '' }
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const mapped = mapRow(rows[rowIndex], lookup, rowCarry)
-    if (isCoupangEsserColumnTotalRow(mapped, rowIndex)) {
+    if (isCoupangEsserColumnTotalRow(mapped, rowIndex, options)) {
       const kind = rowIndex === 0 ? 'header' : 'footer'
       const totalDetail = coupangEsserSheetTotalToPeriodDetail(
         mapped,
@@ -625,6 +675,7 @@ export function parseCoupangEsserPeriod(fileName, headers, rows, platform = '쿠
         fallbackPlatform,
         salesMethod,
         kind,
+        options,
       )
       if (totalDetail) sheetTotalForFile = mergeSheetTotalForFile(sheetTotalForFile, totalDetail)
       else skippedSummary += 1
@@ -638,6 +689,7 @@ export function parseCoupangEsserPeriod(fileName, headers, rows, platform = '쿠
       fileName,
       fallbackPlatform,
       salesMethod,
+      options,
     )
     if (detail) details.push(detail)
   }
@@ -675,7 +727,8 @@ export function parseCoupangEsserPeriod(fileName, headers, rows, platform = '쿠
 /**
  * 쿠팡 에쎄르 일일 상품별 매출 엑셀 → 상세 거래 레코드
  */
-export function parseCoupangEsserDaily(fileName, headers, rows, platform = '쿠팡') {
+export function parseCoupangEsserDaily(fileName, headers, rows, platform = '쿠팡', options = {}) {
+  options = withResolvedZeroSalesOption(fileName, options)
   const fallbackPlatform =
     detectPlatformFromFileName(fileName) || platform
   const spec = parseFilenameDateSpec(fileName)
@@ -696,7 +749,7 @@ export function parseCoupangEsserDaily(fileName, headers, rows, platform = '쿠�
   const rowCarry = { lastChannelKind: '', lastDeliveryMethod: '' }
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const mapped = mapRow(rows[rowIndex], lookup, rowCarry)
-    if (isCoupangEsserColumnTotalRow(mapped, rowIndex)) {
+    if (isCoupangEsserColumnTotalRow(mapped, rowIndex, options)) {
       const kind = rowIndex === 0 ? 'header' : 'footer'
       const totalDetail = coupangEsserSheetTotalToDetail(
         mapped,
@@ -705,6 +758,7 @@ export function parseCoupangEsserDaily(fileName, headers, rows, platform = '쿠�
         fallbackPlatform,
         salesMethod,
         kind,
+        options,
       )
       if (totalDetail) sheetTotalForFile = mergeSheetTotalForFile(sheetTotalForFile, totalDetail)
       else skippedSummary += 1
@@ -716,13 +770,21 @@ export function parseCoupangEsserDaily(fileName, headers, rows, platform = '쿠�
         businessDate = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`
       }
     }
-    const detail = coupangEsserToDetail(mapped, businessDate, fileName, fallbackPlatform, salesMethod)
+    const detail = coupangEsserToDetail(
+      mapped,
+      businessDate,
+      fileName,
+      fallbackPlatform,
+      salesMethod,
+      options,
+    )
     if (detail) details.push(detail)
     else if (!isCoupangEsserSummaryRow(mapped) && mapped.product_name) {
       const hasMetrics = hasEsserMeasurableActivity(
         mapped,
         parseAmount(mapped.sales_qty),
         parseAmount(mapped.sales),
+        options,
       )
       if (hasMetrics && !mapped.sale_date && !businessDate) {
         skippedNoDate += 1
@@ -775,7 +837,7 @@ export function parseCoupangEsserDaily(fileName, headers, rows, platform = '쿠�
     } else if (skippedSummary >= rows.length) {
       emptyHint = '합계 행만 있고 상품 행이 없습니다. 빅셀 「상품별」 매출분석 파일인지 확인하세요.'
     } else {
-      emptyHint = `상품 행 ${rows.length}건을 읽었으나 매출·수량·광고 지표가 없어 저장하지 못했습니다. 헤더: ${headerPreview || '(없음)'}`
+      emptyHint = `상품 행 ${rows.length}건을 읽었으나 저장할 상품을 만들지 못했습니다. 헤더: ${headerPreview || '(없음)'}`
     }
   }
 
@@ -816,9 +878,10 @@ function coupangEsserToMonthlyDetail(
   platform,
   salesMethod,
   fallbackDate = '',
+  options = {},
 ) {
   if (m.sale_date) {
-    const detail = coupangEsserToDetail(m, fallbackDate, fileName, platform, salesMethod)
+    const detail = coupangEsserToDetail(m, fallbackDate, fileName, platform, salesMethod, options)
     return tagMonthlyDetail(detail, periodFrom, periodTo)
   }
   const detail = coupangEsserToPeriodDetail(
@@ -829,6 +892,7 @@ function coupangEsserToMonthlyDetail(
     fileName,
     platform,
     salesMethod,
+    options,
   )
   if (!detail) return null
   return { ...detail, uploadFormat: MONTHLY_UPLOAD_FORMAT }
@@ -843,6 +907,7 @@ function coupangEsserSheetTotalToMonthlyDetail(
   platform,
   salesMethod,
   sheetTotalKind = 'footer',
+  options = {},
 ) {
   const base = coupangEsserSheetTotalToPeriodDetail(
     m,
@@ -853,6 +918,7 @@ function coupangEsserSheetTotalToMonthlyDetail(
     platform,
     salesMethod,
     sheetTotalKind,
+    options,
   )
   if (!base) return null
   return { ...base, uploadFormat: MONTHLY_UPLOAD_FORMAT }
@@ -874,7 +940,8 @@ function countDistinctSaleDates(rows, lookup) {
 /**
  * 쿠팡 에쎄르 월별 매출 (파일명 1일~말일, 날짜 열 있으면 일자별·없으면 기간 합산)
  */
-export function parseCoupangEsserMonthly(fileName, headers, rows, platform = '쿠팡') {
+export function parseCoupangEsserMonthly(fileName, headers, rows, platform = '쿠팡', options = {}) {
+  options = withResolvedZeroSalesOption(fileName, options)
   const fallbackPlatform = detectPlatformFromFileName(fileName) || platform
   const spec = parseFilenameDateSpec(fileName)
   if (spec.type !== 'range') {
@@ -899,7 +966,7 @@ export function parseCoupangEsserMonthly(fileName, headers, rows, platform = '�
 
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const mapped = mapRow(rows[rowIndex], lookup, rowCarry)
-    if (isCoupangEsserColumnTotalRow(mapped, rowIndex)) {
+    if (isCoupangEsserColumnTotalRow(mapped, rowIndex, options)) {
       const kind = rowIndex === 0 ? 'header' : 'footer'
       const totalDetail = coupangEsserSheetTotalToMonthlyDetail(
         mapped,
@@ -910,6 +977,7 @@ export function parseCoupangEsserMonthly(fileName, headers, rows, platform = '�
         fallbackPlatform,
         salesMethod,
         kind,
+        options,
       )
       if (totalDetail) sheetTotalForFile = mergeSheetTotalForFile(sheetTotalForFile, totalDetail)
       else skippedSummary += 1
@@ -925,6 +993,7 @@ export function parseCoupangEsserMonthly(fileName, headers, rows, platform = '�
       fallbackPlatform,
       salesMethod,
       periodFrom,
+      options,
     )
     if (detail) details.push(detail)
     else if (!isCoupangEsserSummaryRow(mapped) && mapped.product_name) {
@@ -932,6 +1001,7 @@ export function parseCoupangEsserMonthly(fileName, headers, rows, platform = '�
         mapped,
         parseAmount(mapped.sales_qty),
         parseAmount(mapped.sales),
+        options,
       )
       if (hasMetrics && !mapped.sale_date && !usePerDayRows) {
         skippedNoDate += 1

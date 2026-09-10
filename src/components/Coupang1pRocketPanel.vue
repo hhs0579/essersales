@@ -1,19 +1,27 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, toRef } from 'vue'
 import { useCoupang1pRocket } from '../composables/useCoupang1pRocket.js'
 import { calcCoupang1pLine } from '../utils/coupang1pRocketRecords.js'
 import { coupang1pProductDisplayName } from '../config/coupang1pRocket.js'
 import { COUPANG_1P_ROCKET_SCOPE } from '../config/coupang1pRocket.js'
 import { manualAdEntryVisibleInPanel, manualAdHasDateFilter } from '../utils/manualAdSpend.js'
-import { maxReportDateYmd } from '../utils/reportDateRange.js'
+import {
+  resolveManualEntryDefaultDate,
+  resolveManualEntryDateSuggest,
+  applyManualEntryDefaultToEmptyRows,
+} from '../utils/manualEntryDate.js'
 import YmdDateFields from './YmdDateFields.vue'
 
 const props = defineProps({
   scope: { type: String, default: COUPANG_1P_ROCKET_SCOPE },
+  brandKey: { type: String, default: 'bestheim' },
   filterCtx: { type: Object, default: () => ({}) },
 })
 
-const { store, addProduct, removeProduct, addOrder, removeOrder, saveStore } = useCoupang1pRocket()
+const brandKeyRef = toRef(props, 'brandKey')
+
+const { brand, store, addProduct, removeProduct, addOrder, removeOrder, saveStore } =
+  useCoupang1pRocket(brandKeyRef)
 
 const saving = ref(false)
 const saveMsg = ref('')
@@ -33,27 +41,18 @@ async function onSave() {
   }
 }
 
-const singleFilterDate = computed(() => {
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom && dateTo && dateFrom === dateTo) return dateFrom
-  return ''
-})
 
-/** 새 행·빈 일자 드롭다운 기본값 */
-const orderDateSuggest = computed(() => {
-  if (singleFilterDate.value) return singleFilterDate.value
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom) return dateFrom
-  if (dateTo) return dateTo
-  return maxReportDateYmd()
-})
+const orderDateSuggest = computed(() => resolveManualEntryDateSuggest(props.filterCtx, 'daily'))
 
-watch(singleFilterDate, (date) => {
-  if (!date) return
-  for (const row of store.value.orders) {
-    if (!row.date) row.date = date
-  }
-})
+const newOrderDefaultDate = computed(() => resolveManualEntryDefaultDate(props.filterCtx, 'daily'))
+
+watch(
+  () => newOrderDefaultDate.value,
+  (date) => {
+    if (!date) return
+    applyManualEntryDefaultToEmptyRows(store.value.orders, props.filterCtx, 'daily')
+  },
+)
 
 const visibleOrders = computed(() =>
   store.value.orders.filter((row) => manualAdEntryVisibleInPanel(row, props.filterCtx)),
@@ -71,7 +70,7 @@ const sortedOrders = computed(() =>
 )
 
 function onAddOrder() {
-  addOrder(singleFilterDate.value || '')
+  addOrder(newOrderDefaultDate.value || '')
 }
 
 const productOptions = computed(() =>
@@ -98,6 +97,9 @@ function fmtWon(n) {
 
 <template>
   <div class="coupang-1p-panel">
+    <p class="standard-ref section-hint brand-banner">
+      쿠팡 1P 로켓 · <strong>{{ brand.tabLabel }}</strong> — 발주 직접입력
+    </p>
     <section class="c1p-section">
       <h4 class="c1p-section-title">① 판매 상품 리스트</h4>
       <p class="standard-ref section-hint">
@@ -165,9 +167,14 @@ function fmtWon(n) {
       <p class="standard-ref section-hint">
         발주일·제품·발주수량을 입력하면
         <strong>쿠팡 매입금액</strong>(매출)·<strong>총 공급원가</strong>(원가)·<strong>순이익</strong>이 자동 계산되어
-        베스트하임 쿠팡 매출 KPI에 반영됩니다.
-        <span v-if="singleFilterDate" class="filter-date-hint">
-          조회 일자 <strong>{{ singleFilterDate }}</strong> — 새 행·빈 일자에 자동 적용
+        <template v-if="brand.key === 'bestheim'">
+          베스트하임 쿠팡 매출 KPI에 반영됩니다.
+        </template>
+        <template v-else>
+          사본느리(에쎄르) 쿠팡 매출 KPI에 반영됩니다.
+        </template>
+        <span v-if="orderDateSuggest" class="filter-date-hint">
+          조회 기간 자동 적용 — <strong>{{ orderDateSuggest }}</strong>
         </span>
         <span v-else-if="hasDateFilter" class="filter-date-hint">
           조회 기간 —
@@ -176,7 +183,7 @@ function fmtWon(n) {
           </strong>
           <strong v-else-if="filterCtx.dateFrom">{{ filterCtx.dateFrom }} ~</strong>
           <strong v-else-if="filterCtx.dateTo">~ {{ filterCtx.dateTo }}</strong>
-          에 맞는 발주만 표시합니다. 발주일은 <strong>년 · 월 · 일</strong> 드롭다운으로 지정하세요.
+          에 맞는 발주만 표시합니다. 발주일은 조회 기간에 맞게 <strong>자동 입력</strong>됩니다.
         </span>
         <span v-if="hiddenOrderCount > 0" class="filter-date-hint muted-hint">
           조회 기간 밖 {{ hiddenOrderCount }}건은 숨겨져 있습니다. (저장 데이터는 유지)
@@ -276,6 +283,13 @@ function fmtWon(n) {
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+.brand-banner {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #e0f2fe;
 }
 
 .c1p-section-title {

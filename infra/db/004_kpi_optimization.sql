@@ -73,3 +73,7 @@ EXECUTE PROCEDURE sales_records_compute_kpi_dates();
 CREATE INDEX IF NOT EXISTS idx_sales_kpi_date ON sales_records (kpi_date, platform, sales_method);
 CREATE INDEX IF NOT EXISTS idx_sales_kpi_agg_date ON sales_records (kpi_aggregation_date, platform, sales_method);
 CREATE INDEX IF NOT EXISTS idx_sales_upload_kind ON sales_records (upload_kind);
+
+INSERT INTO schema_migrations (version, name)
+VALUES (4, '004_kpi_optimization')
+ON CONFLICT (version) DO NOTHING;

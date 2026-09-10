@@ -5,7 +5,11 @@ import { calcPowerPriceLine } from '../utils/powerPriceRecords.js'
 import ManualAdSpendPanel from './ManualAdSpendPanel.vue'
 import { POWER_PRICE_PLATFORM_FEE_RATE, POWER_PRICE_SCOPE } from '../config/powerPrice.js'
 import { manualAdEntryVisibleInPanel, manualAdHasDateFilter } from '../utils/manualAdSpend.js'
-import { maxReportDateYmd } from '../utils/reportDateRange.js'
+import {
+  resolveManualEntryDefaultDate,
+  resolveManualEntryDateSuggest,
+  applyManualEntryDefaultToEmptyRows,
+} from '../utils/manualEntryDate.js'
 import YmdDateFields from './YmdDateFields.vue'
 
 const props = defineProps({
@@ -33,26 +37,18 @@ async function onSave() {
   }
 }
 
-const singleFilterDate = computed(() => {
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom && dateTo && dateFrom === dateTo) return dateFrom
-  return ''
-})
 
-const saleDateSuggest = computed(() => {
-  if (singleFilterDate.value) return singleFilterDate.value
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom) return dateFrom
-  if (dateTo) return dateTo
-  return maxReportDateYmd()
-})
+const saleDateSuggest = computed(() => resolveManualEntryDateSuggest(props.filterCtx, 'daily'))
 
-watch(singleFilterDate, (date) => {
-  if (!date) return
-  for (const row of store.value.sales) {
-    if (!row.date) row.date = date
-  }
-})
+const newSaleDefaultDate = computed(() => resolveManualEntryDefaultDate(props.filterCtx, 'daily'))
+
+watch(
+  () => newSaleDefaultDate.value,
+  (date) => {
+    if (!date) return
+    applyManualEntryDefaultToEmptyRows(store.value.sales, props.filterCtx, 'daily')
+  },
+)
 
 const productOptions = computed(() =>
   store.value.products.filter((p) => p.name.trim()),
@@ -87,7 +83,7 @@ const sortedSales = computed(() =>
 )
 
 function onAddSale() {
-  addSale(singleFilterDate.value || '')
+  addSale(newSaleDefaultDate.value || '')
 }
 
 function fmtWon(n) {
@@ -166,8 +162,8 @@ function fmtWon(n) {
         일자·물품·수량·<strong>옵션가</strong>를 입력하면 매출·원가·순이익이 자동 계산되어 대시보드 KPI에 반영됩니다.
         매출의 <strong>{{ (POWER_PRICE_PLATFORM_FEE_RATE * 100).toFixed(0) }}%</strong>(판매수수료+배송료)를 차감한 뒤 원가를 빼 순이익을 표시합니다.
         옵션가는 물품 판매가에 더해지는 금액(1개당)입니다. 저장 버튼 없이도 아래 대시보드에 즉시 반영됩니다.
-        <span v-if="singleFilterDate" class="filter-date-hint">
-          조회 일자 <strong>{{ singleFilterDate }}</strong> — 새 행·빈 일자에 자동 적용
+        <span v-if="saleDateSuggest" class="filter-date-hint">
+          조회 기간 자동 적용 — <strong>{{ saleDateSuggest }}</strong>
         </span>
         <span v-else-if="hasDateFilter" class="filter-date-hint">
           조회 기간 —

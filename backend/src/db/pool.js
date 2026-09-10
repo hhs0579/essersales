@@ -14,9 +14,9 @@ export function createPool(dbConfig) {
   pool = new Pool({
     connectionString: dbConfig.connectionString,
     client_encoding: 'UTF8',
-    max: 10,
+    max: Number(process.env.DB_POOL_MAX || 20),
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 15_000,
   })
 
   pool.on('error', (err) => {
@@ -28,9 +28,34 @@ export function createPool(dbConfig) {
 
 export function getPool() {
   if (!pool) {
+    const host = process.env.DB_HOST
+    const user = process.env.DB_USER
+    const database = process.env.DB_NAME
+    const password = process.env.DB_PASSWORD ?? ''
+    const port = process.env.DB_PORT || '5432'
+    const fromUrl = process.env.DATABASE_URL
+    const connectionString =
+      fromUrl ||
+      (host && user && database
+        ? `postgres://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`
+        : '')
+    if (connectionString) {
+      return createPool({ connectionString })
+    }
     throw new Error('Database pool is not initialized')
   }
   return pool
+}
+
+function formatDbError(err) {
+  if (!err) return 'unknown'
+  if (Array.isArray(err.errors) && err.errors.length) {
+    return err.errors.map(formatDbError).join('; ')
+  }
+  const code = err.code || err.errno || ''
+  const msg = err.message || ''
+  const extra = err.cause ? formatDbError(err.cause) : ''
+  return [code, msg, extra].filter(Boolean).join(' ').trim() || String(err)
 }
 
 /**
@@ -57,7 +82,7 @@ export async function testConnection() {
   } catch (err) {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: formatDbError(err),
     }
   }
 }

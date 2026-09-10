@@ -19,6 +19,8 @@ server/data/backup/
 deploy/nas-transfer/**/backups/
 /deploy/nas-transfer/
 /0
+tmp/
+
 
 # Phase 0 — runtime data (keep directory via .gitkeep)
 uploads/*

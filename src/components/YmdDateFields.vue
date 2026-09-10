@@ -4,8 +4,10 @@ import { clampToMaxReportDate, maxReportDateYmd } from '../utils/reportDateRange
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
-  /** 값이 비어 있을 때 드롭다운에 보여 줄 기준일 (YYYY-MM-DD) */
+  /** 값이 비어 있을 때 드롭다운·저장에 쓰는 기준일 (YYYY-MM-DD) */
   suggestDate: { type: String, default: '' },
+  /** suggestDate를 빈 행에 자동 저장 (조회 기간 연동) */
+  autoApplySuggest: { type: Boolean, default: true },
   minYear: { type: Number, default: 2020 },
   maxDate: { type: String, default: '' },
 })
@@ -92,18 +94,28 @@ function syncFromSource(src) {
   day.value = p.d
 }
 
+function applySuggestIfEmpty() {
+  const suggest = String(props.suggestDate || '').trim()
+  if (!props.autoApplySuggest || props.modelValue || !/^\d{4}-\d{2}-\d{2}$/.test(suggest)) {
+    return false
+  }
+  syncFromSource(suggest)
+  emit('update:modelValue', suggest)
+  return true
+}
+
 watch(
-  () => props.modelValue,
-  (v) => {
+  () => [props.modelValue, props.suggestDate, props.autoApplySuggest],
+  ([v]) => {
     if (v) {
       syncFromSource(v)
       return
     }
-    // 값이 비면 드롭다운도 비움. suggestDate를 표시만 하면 저장된 날짜처럼 보이거나
-    // 필터 시작일(dateFrom)로 오인·저장되는 사고가 난다.
-    year.value = ''
-    month.value = ''
-    day.value = ''
+    if (!applySuggestIfEmpty()) {
+      year.value = ''
+      month.value = ''
+      day.value = ''
+    }
   },
   { immediate: true },
 )

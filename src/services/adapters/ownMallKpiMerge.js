@@ -1,4 +1,4 @@
-import { isCombinedScope } from '../../config/dataChannels.js'
+import { isCombinedScope, isMonthlyScope } from '../../config/dataChannels.js'
 import { deriveEsserProfitKpis, finalizeEsserBucket, aggregateEsserByDay } from '../../utils/esserMetrics.js'
 import {
   applyRecordFilters,
@@ -7,11 +7,72 @@ import {
 import {
   buildPlatformKpiSplitRows,
   buildMergedTotalRow,
+  buildCombinedKpiSplitRows,
+  buildCombinedSegmentsTotalRow,
   isManualAdKpiLabel,
 } from '../../utils/platformKpiSplit.js'
+import { buildSpecialSaleKpiRows } from '../../utils/specialSaleKpi.js'
+import {
+  buildManualExpenseKpiRows,
+  isManualExpenseSegmentKind,
+} from '../../utils/manualExpenseKpi.js'
+import { COMBINED_SEGMENT_DEFS } from '../../utils/combinedKpiSegments.js'
+
+const OWN_MALL_COMBINED_SEGMENT_LABEL = '사본느리(자사몰)'
 
 export function shouldMergeOwnMallManualKpi(scope) {
   return scope === 'company_b' || scope === 'company_b_monthly' || isCombinedScope(scope)
+}
+
+function lastDayOfMonth(year, month) {
+  return new Date(year, month, 0).getDate()
+}
+
+/**
+ * 월별 scope — 연·월 기준으로 해당 월 1~말일 필터 (일별 7일 range와 year/month 불일치 방지)
+ * @param {string} scope
+ * @param {object} filters
+ */
+export function buildOwnMallKpiFilterCtx(scope, filters = {}) {
+  const base = { ...filters, platform: '' }
+  if (!isMonthlyScope(scope)) return base
+
+  const y = String(filters.year || '').trim()
+  const mo = String(filters.month || '').trim()
+  if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
+    const month = Number(mo)
+    const padMo = String(month).padStart(2, '0')
+    const last = lastDayOfMonth(Number(y), month)
+    return {
+      ...base,
+      year: y,
+      month: String(month),
+      dateFrom: `${y}-${padMo}-01`,
+      dateTo: `${y}-${padMo}-${String(last).padStart(2, '0')}`,
+      dayOfWeek: '',
+      period: 'monthly',
+    }
+  }
+
+  const to = String(filters.dateTo || filters.dateFrom || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    const yy = to.slice(0, 4)
+    const mm = String(Number(to.slice(5, 7)))
+    const month = Number(mm)
+    const padMo = String(month).padStart(2, '0')
+    const last = lastDayOfMonth(Number(yy), month)
+    return {
+      ...base,
+      year: yy,
+      month: mm,
+      dateFrom: `${yy}-${padMo}-01`,
+      dateTo: `${yy}-${padMo}-${String(last).padStart(2, '0')}`,
+      dayOfWeek: '',
+      period: 'monthly',
+    }
+  }
+
+  return { ...base, period: 'monthly' }
 }
 
 function filterOwnMallRecordsForKpi(records, filterCtx = {}) {
@@ -40,23 +101,173 @@ export function buildOwnMallPlatformRow(ownMallRecords, filterCtx = {}) {
   return rows.find((r) => r.label === '자사몰') || null
 }
 
+function segmentRowHasActivity(row) {
+  if (!row) return false
+  const p = row.profit || {}
+  const a = row.ad || {}
+  return (
+    (p.sales || 0) !== 0 ||
+    (p.salesQty || 0) !== 0 ||
+    (p.netProfit || 0) !== 0 ||
+    (a.adSpend || 0) !== 0 ||
+    (a.adSales || 0) !== 0 ||
+    (row.rowCount || 0) > 0
+  )
+}
+
+/**
+ * 통합 by-segment — 사본느리(자사몰) 직접입력 보강
+ * @param {ReturnType<import('./platformKpiAdapter.js').adaptServerSegmentKpiRows>} serverRows
+ */
+export function mergeOwnMallIntoCombinedSegmentRows(serverRows, ownMallRecords, filterCtx = {}) {
+  const filtered = filterOwnMallRecordsForKpi(ownMallRecords, filterCtx)
+  const map = new Map((serverRows || []).map((r) => [r.label, r]))
+
+  if (filtered.length) {
+    const split = buildCombinedKpiSplitRows(filtered, filtered, [], filterCtx)
+    const addon = split.find((r) => r.label === OWN_MALL_COMBINED_SEGMENT_LABEL)
+    if (addon && segmentRowHasActivity(addon)) {
+      // 자사몰은 DB가 아닌 app_settings 직접입력이 단일 소스
+      map.set(OWN_MALL_COMBINED_SEGMENT_LABEL, addon)
+    }
+  }
+
+  const manualAdRows = (serverRows || []).filter((r) => isManualAdKpiLabel(r.label))
+  const segmentRows = []
+  const fixedLabels = new Set(COMBINED_SEGMENT_DEFS.map((d) => d.label))
+
+  for (const def of COMBINED_SEGMENT_DEFS) {
+    const row = map.get(def.label)
+    if (!segmentRowHasActivity(row)) continue
+    segmentRows.push(row)
+  }
+
+  // 고정 세그먼트 외 동적 행 유지 (특판 수기·특판 폐쇄몰 판매처 등)
+  // 예전: 폐쇄몰만 남겨 특판 수기 행이 KPI에서 사라짐
+  for (const row of serverRows || []) {
+    const label = row.label
+    if (!label || label === '합계' || isManualAdKpiLabel(label)) continue
+    if (fixedLabels.has(label)) continue
+    const merged = map.get(label) || row
+    if (!segmentRowHasActivity(merged)) continue
+    if (segmentRows.some((r) => r.label === label)) continue
+    segmentRows.push(merged)
+  }
+
+  const total = buildCombinedSegmentsTotalRow(segmentRows, manualAdRows)
+  return [...segmentRows, ...manualAdRows, total]
+}
+
+/**
+ * 통합 월별 — 특판 수기 행을 클라 스냅샷으로 보강 (서버 month 키 불일치 대비)
+ * @param {ReturnType<import('./platformKpiAdapter.js').adaptServerSegmentKpiRows>} serverRows
+ * @param {{ entries?: unknown[] } | null | undefined} specialSale
+ */
+export function mergeSpecialSaleIntoCombinedSegmentRows(serverRows, specialSale) {
+  const ssRows = buildSpecialSaleKpiRows(specialSale).filter(segmentRowHasActivity)
+  if (!ssRows.length) return serverRows || []
+
+  const rows = serverRows || []
+  const map = new Map(rows.map((r) => [r.label, r]))
+  const ssLabels = new Set(ssRows.map((r) => r.label))
+
+  for (const row of ssRows) {
+    map.set(row.label, row)
+  }
+
+  const manualAdRows = rows.filter((r) => isManualAdKpiLabel(r.label))
+  const segmentRows = []
+  const fixedLabels = new Set(COMBINED_SEGMENT_DEFS.map((d) => d.label))
+
+  for (const def of COMBINED_SEGMENT_DEFS) {
+    const row = map.get(def.label)
+    if (!segmentRowHasActivity(row)) continue
+    segmentRows.push(row)
+  }
+
+  for (const row of rows) {
+    const label = row.label
+    if (!label || label === '합계' || isManualAdKpiLabel(label)) continue
+    if (fixedLabels.has(label) || ssLabels.has(label)) continue
+    const merged = map.get(label) || row
+    if (!segmentRowHasActivity(merged)) continue
+    if (segmentRows.some((r) => r.label === label)) continue
+    segmentRows.push(merged)
+  }
+
+  for (const row of ssRows) {
+    if (segmentRows.some((r) => r.label === row.label)) continue
+    segmentRows.push(row)
+  }
+
+  const total = buildCombinedSegmentsTotalRow(segmentRows, manualAdRows)
+  return [...segmentRows, ...manualAdRows, total]
+}
+
+/**
+ * @param {object[]} serverRows
+ * @param {{ entries?: unknown[] } | null | undefined} manualExpense
+ */
+export function mergeManualExpenseIntoCombinedSegmentRows(serverRows, manualExpense) {
+  const expenseRows = buildManualExpenseKpiRows(manualExpense).filter(segmentRowHasActivity)
+  if (!expenseRows.length) return serverRows || []
+
+  const rows = serverRows || []
+  const map = new Map(rows.map((r) => [r.label, r]))
+  const expenseLabels = new Set(expenseRows.map((r) => r.label))
+
+  for (const row of expenseRows) {
+    map.set(row.label, row)
+  }
+
+  const manualAdRows = rows.filter((r) => isManualAdKpiLabel(r.label))
+  const segmentRows = []
+  const fixedLabels = new Set(COMBINED_SEGMENT_DEFS.map((d) => d.label))
+
+  for (const def of COMBINED_SEGMENT_DEFS) {
+    const row = map.get(def.label)
+    if (!segmentRowHasActivity(row)) continue
+    segmentRows.push(row)
+  }
+
+  for (const row of rows) {
+    const label = row.label
+    if (!label || label === '합계' || isManualAdKpiLabel(label)) continue
+    if (fixedLabels.has(label) || expenseLabels.has(label)) continue
+    if (isManualExpenseSegmentKind(row)) continue
+    const merged = map.get(label) || row
+    if (!segmentRowHasActivity(merged)) continue
+    if (segmentRows.some((r) => r.label === label)) continue
+    segmentRows.push(merged)
+  }
+
+  for (const row of expenseRows) {
+    if (segmentRows.some((r) => r.label === row.label)) continue
+    segmentRows.push(row)
+  }
+
+  const total = buildCombinedSegmentsTotalRow(segmentRows, manualAdRows)
+  return [...segmentRows, ...manualAdRows, total]
+}
+
 /**
  * Server by-platform KPI + own_mall_manual (app_settings)
  * @param {ReturnType<import('./platformKpiAdapter.js').adaptServerPlatformKpiRows>} serverRows
  */
 export function mergeOwnMallManualIntoServerPlatformRows(serverRows, ownMallRecords, filterCtx = {}) {
-  if (!serverRows?.length) return serverRows
   const ownMallRow = buildOwnMallPlatformRow(ownMallRecords, filterCtx)
-  if (!ownMallRow) return serverRows
+  if (!ownMallRow) return serverRows || []
 
-  const manualAdRows = serverRows.filter((r) => isManualAdKpiLabel(r.label))
-  const coupang = serverRows.find((r) => r.label === '쿠팡') || {
+  const rows = serverRows || []
+
+  const manualAdRows = rows.filter((r) => isManualAdKpiLabel(r.label))
+  const coupang = rows.find((r) => r.label === '쿠팡') || {
     label: '쿠팡',
     profit: {},
     ad: {},
     rowCount: 0,
   }
-  const smart = serverRows.find((r) => r.label === '스마트스토어') || {
+  const smart = rows.find((r) => r.label === '스마트스토어') || {
     label: '스마트스토어',
     profit: {},
     ad: {},

@@ -34,6 +34,30 @@ function mapSettingRow(row, { omitSources = false } = {}) {
   }
 }
 
+/** Node가 dataBase64를 파싱하지 않도록 DB에서 제거 (부팅 502 방지) */
+const OWN_MALL_DATA_OMIT_SOURCES_SQL = `CASE
+  WHEN kind = 'own_mall_manual'
+   AND data IS NOT NULL
+   AND jsonb_typeof(data->'salesSourceFiles') = 'array'
+  THEN jsonb_set(
+    data,
+    '{salesSourceFiles}',
+    COALESCE((
+      SELECT jsonb_agg(
+        CASE WHEN jsonb_typeof(elem) = 'object' THEN elem - 'dataBase64' ELSE elem END
+      )
+      FROM jsonb_array_elements(data->'salesSourceFiles') AS elem
+    ), '[]'::jsonb)
+  )
+  ELSE data
+END`
+
+function settingSelectSql(omitSources) {
+  const dataExpr = omitSources ? OWN_MALL_DATA_OMIT_SOURCES_SQL : 'data'
+  return `SELECT scope, kind, ${dataExpr} AS data, updated_at,
+            octet_length(data::text) AS data_size`
+}
+
 /**
  * @param {string} scope
  * @param {string} kind
@@ -41,9 +65,9 @@ function mapSettingRow(row, { omitSources = false } = {}) {
  */
 export async function getSetting(scope, kind, opts = {}) {
   const pool = getPool()
+  const omitSources = Boolean(opts.omitSources)
   const res = await pool.query(
-    `SELECT scope, kind, data, updated_at,
-            octet_length(data::text) AS data_size
+    `${settingSelectSql(omitSources)}
      FROM app_settings
      WHERE scope = $1 AND kind = $2`,
     [scope, kind],
@@ -108,8 +132,7 @@ export async function listSettings(query) {
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const res = await pool.query(
-    `SELECT scope, kind, data, updated_at,
-            octet_length(data::text) AS data_size
+    `${settingSelectSql(filters.omitSources)}
      FROM app_settings ${where}
      ORDER BY scope, kind`,
     params,

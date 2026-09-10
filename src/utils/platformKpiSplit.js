@@ -40,6 +40,11 @@ import {
   isManualAdKpiLabel,
 } from '../config/manualAdSpend.js'
 import { buildSpecialSaleKpiRows, isSpecialSaleRowLabel } from './specialSaleKpi.js'
+import {
+  buildManualExpenseKpiRows,
+  isManualExpenseRowLabel,
+  isManualExpenseSegmentKind,
+} from './manualExpenseKpi.js'
 
 export {
   EXTERNAL_AD_KPI_LABEL,
@@ -287,7 +292,7 @@ export function buildMergedTotalRow(coupang, smart, ownMall, extraAdRows = [], c
   }
 }
 
-/** 특판 폐쇄몰 → 판매처별 `브랜드(판매처)` KPI 행 */
+/** 특판 폐쇄몰 → 판매처별 `브랜드(판매처)` KPI 행 — 업로드 탭(에쎄르|베스트하임) 기준 */
 export function buildClosedMallPlatformRows(sourceRecords) {
   const closed = (sourceRecords || []).filter((r) => isClosedMallRecord(r))
   if (!closed.length) return []
@@ -512,7 +517,7 @@ function buildCombinedBrandKpiRows(allRecords, manualAdByChannel, manualFilterCt
 
 
 
-function buildCombinedSegmentsTotalRow(segmentRows, manualAdRows = []) {
+export function buildCombinedSegmentsTotalRow(segmentRows, manualAdRows = []) {
   let sales = 0
   let salesQty = 0
   let totalCost = 0
@@ -537,6 +542,79 @@ function buildCombinedSegmentsTotalRow(segmentRows, manualAdRows = []) {
   const ad = finalizeEsserBucket({ sales, salesQty, totalCost, netProfit, adSpend, adSales })
 
   return { label: '합계', profit, ad, rowCount }
+}
+
+function kpiRowHasActivity(row) {
+  if (!row) return false
+  const p = row.profit || {}
+  const a = row.ad || {}
+  return (
+    (p.sales || 0) !== 0 ||
+    (p.salesQty || 0) !== 0 ||
+    (p.netProfit || 0) !== 0 ||
+    (a.adSpend || 0) !== 0 ||
+    (a.adSales || 0) !== 0 ||
+    (row.rowCount || 0) > 0
+  )
+}
+
+/** 구분 KPI 행 → 상단 카드용 버킷 */
+export function esserBucketFromPlatformKpiRow(row) {
+  if (!row) return null
+  const p = row.profit || {}
+  const a = row.ad || {}
+  const base = finalizeEsserBucket({
+    sales: p.sales || 0,
+    salesQty: p.salesQty || 0,
+    totalCost: p.totalCost || 0,
+    netProfit: p.netProfit || 0,
+    adSpend: a.adSpend || 0,
+    adSales: a.adSales || 0,
+  })
+  return deriveEsserProfitKpis(base, { productKpi: base })
+}
+
+/**
+ * 베스트하임 대시보드 구분 — 빅셀 채널만 (기타판매처는 기타 판매처 탭·통합)
+ */
+export function reshapeBestheimKpiRowsToCombined구분(serverRows, rocketRow) {
+  const rows = serverRows || []
+  const manualAdRows = rows.filter((r) => isManualAdKpiLabel(r.label))
+  const coupang = rows.find(
+    (r) =>
+      r.label === '쿠팡' ||
+      r.label === '베스트하임(판매자+그로스)' ||
+      r.label === '베스트하임(판매자)' ||
+      r.label === '베스트하임(그로스)',
+  )
+  const seller = rows.find((r) => r.label === '베스트하임(판매자)')
+  const growth = rows.find((r) => r.label === '베스트하임(그로스)')
+  const smart = rows.find(
+    (r) => r.label === '스마트스토어' || r.label === '베스트하임(스스)',
+  )
+  const rocket = rocketRow
+    ? { ...rocketRow, label: '베스트하임(로켓)' }
+    : rows.find((r) => r.label === '베스트하임(로켓)')
+
+  const segmentRows = []
+  if (kpiRowHasActivity(seller)) {
+    segmentRows.push({ ...seller, label: '베스트하임(판매자)' })
+  }
+  if (kpiRowHasActivity(growth)) {
+    segmentRows.push({ ...growth, label: '베스트하임(그로스)' })
+  }
+  if (!kpiRowHasActivity(seller) && !kpiRowHasActivity(growth) && kpiRowHasActivity(coupang)) {
+    segmentRows.push({ ...coupang, label: '베스트하임(판매자)' })
+  }
+  if (kpiRowHasActivity(rocket)) {
+    segmentRows.push({ ...rocket, label: '베스트하임(로켓)' })
+  }
+  if (kpiRowHasActivity(smart)) {
+    segmentRows.push({ ...smart, label: '베스트하임(스스)' })
+  }
+
+  const total = buildCombinedSegmentsTotalRow(segmentRows, manualAdRows)
+  return [...segmentRows, ...manualAdRows, total]
 }
 
 /**
@@ -571,7 +649,7 @@ export function buildCombinedKpiSplitRows(
       segmentRows.push(buildPlatformRow(def.label, subset, { estimateCostFromMargin }))
     }
 
-    // 베스트하임(스스) 다음에 특판 판매처별 행
+    // 베스트하임(스스) 다음 — 특판 판매처별 행 (업로드 탭·판매처 기준 전체)
     if (def.key === 'bh_ss') {
       for (const label of closedMallKpiLabelsFromRecords(source)) {
         const closedSubset = recordsForCombinedSegmentLabel(source, label)
@@ -582,6 +660,7 @@ export function buildCombinedKpiSplitRows(
   }
 
   segmentRows.push(...buildSpecialSaleKpiRows(manualFilterCtx?.specialSale))
+  segmentRows.push(...buildManualExpenseKpiRows(manualFilterCtx?.manualExpense))
 
   const total = buildCombinedSegmentsTotalRow(segmentRows, manualAdRows)
   return [...segmentRows, ...manualAdRows, total]
@@ -648,24 +727,25 @@ export function summarizeCombinedKpis(records, manualAdByChannel, manualFilterCt
   })
 
   const specialSaleRows = buildSpecialSaleKpiRows(manualFilterCtx?.specialSale)
-  if (!specialSaleRows.length) return base
+  const expenseRows = buildManualExpenseKpiRows(manualFilterCtx?.manualExpense)
+  if (!specialSaleRows.length && !expenseRows.length) return base
 
-  let ssSales = 0
-  let ssSalesQty = 0
-  let ssTotalCost = 0
-  let ssNetProfit = 0
-  for (const row of specialSaleRows) {
-    const ss = row.profit || {}
-    ssSales += ss.sales || 0
-    ssSalesQty += ss.salesQty || 0
-    ssTotalCost += ss.totalCost || 0
-    ssNetProfit += ss.netProfit || 0
+  let extraSales = 0
+  let extraSalesQty = 0
+  let extraTotalCost = 0
+  let extraNetProfit = 0
+  for (const row of [...specialSaleRows, ...expenseRows]) {
+    const p = row.profit || {}
+    extraSales += p.sales || 0
+    extraSalesQty += p.salesQty || 0
+    extraTotalCost += p.totalCost || 0
+    extraNetProfit += p.netProfit || 0
   }
   return finalizeEsserBucket({
-    sales: (base.sales || 0) + ssSales,
-    salesQty: (base.salesQty || 0) + ssSalesQty,
-    totalCost: (base.totalCost || 0) + ssTotalCost,
-    netProfit: (base.netProfit || 0) + ssNetProfit,
+    sales: (base.sales || 0) + extraSales,
+    salesQty: (base.salesQty || 0) + extraSalesQty,
+    totalCost: (base.totalCost || 0) + extraTotalCost,
+    netProfit: (base.netProfit || 0) + extraNetProfit,
     adSpend: base.adSpend || 0,
     adSales: base.adSales || 0,
   })
@@ -966,6 +1046,22 @@ export function isSpecialSaleKpiNA(rowLabel, section, key, specialSale = null) {
   if (section === 'profit') return key === 'aov'
   if (section === 'ad') {
     return ['adSales', 'organicSales', 'organicSalesRate', 'salesRoas', 'roas'].includes(key)
+  }
+  return false
+}
+
+/** 통합 수기 지출 행 — 매출·광고 NA, 마진(순이익)만 표시(음수) */
+export function isManualExpenseKpiNA(rowLabel, section, key, expense = null, row = null) {
+  const isExpense =
+    isManualExpenseSegmentKind(row) || isManualExpenseRowLabel(rowLabel, expense)
+  if (!isExpense) return false
+  if (section === 'profit') {
+    return ['sales', 'salesQty', 'aov', 'costRate', 'netProfitRate'].includes(key)
+  }
+  if (section === 'ad') {
+    return ['adSpend', 'adSales', 'organicSales', 'organicSalesRate', 'salesRoas', 'roas'].includes(
+      key,
+    )
   }
   return false
 }

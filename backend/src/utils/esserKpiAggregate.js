@@ -51,7 +51,9 @@ function isClosedMallKpiLabel(label) {
   const s = String(label || '').trim()
   if (s === '특판 폐쇄몰' || s === '베스트하임(특판 폐쇄몰)') return true
   if (/^베스트하임 \(.+\)$/.test(s)) return true
-  return /^(에쎄르|베스트하임)\(.+\)$/.test(s)
+  if (/^(베스트하임|사본느리|에쎄르)\((로켓|판매자\+그로스|스스|자사몰)\)$/.test(s)) return false
+  if (s === '파워프라이스') return false
+  return /^(에쎄르|베스트하임|사본느리)\(.+\)$/.test(s)
 }
 
 function closedMallSellerFromLabel(label) {
@@ -254,12 +256,14 @@ export function rowMatchesKpiDateRange(row, range = {}) {
     if ((!from || point >= from) && (!to || point <= to)) return true
   }
 
-  const periodFrom = row.period_from || row.periodFrom
-  const periodTo = row.period_to || row.periodTo
-  if (periodFrom && periodTo && from && to) {
-    const pf = toYmd(periodFrom)
-    const pt = toYmd(periodTo)
-    if (pf && pt && pf <= to && pt >= from) return true
+  if (!isClosedMallRow(row)) {
+    const periodFrom = row.period_from || row.periodFrom
+    const periodTo = row.period_to || row.periodTo
+    if (periodFrom && periodTo && from && to) {
+      const pf = toYmd(periodFrom)
+      const pt = toYmd(periodTo)
+      if (pf && pt && pf <= to && pt >= from) return true
+    }
   }
 
   return false
@@ -297,31 +301,59 @@ function resolveDayKey(row) {
   return resolveAggregationDate(row)
 }
 
+function rowCost(row) {
+  const data = row.data && typeof row.data === 'object' ? row.data : {}
+  const direct = parseAmount(
+    row.total_cost ?? row.totalCost ?? data.totalCost ?? data.sales_cost ?? row.sales_cost,
+  )
+  if (direct) return direct
+  const qty = parseAmount(row.sales_qty ?? row.salesQty ?? data.salesQty ?? data.quantity)
+  const unit = parseAmount(row.unit_cost ?? row.unitCost ?? data.unitCost ?? data.cost_price)
+  if (unit && qty) return unit * qty
+  return 0
+}
+
 function rowMetrics(row) {
   const data = row.data && typeof row.data === 'object' ? row.data : {}
+  const sales = parseAmount(row.sales ?? data.sales ?? data.actualPayment)
+  const salesQty = parseAmount(row.sales_qty ?? row.salesQty ?? data.salesQty ?? data.quantity)
+  const netProfit = parseAmount(row.net_profit ?? row.netProfit ?? data.netProfit ?? data.margin)
+  // 클라 esserRowValues 와 동일 — 원가 칸 없으면 0. 매출−마진 역산은 스스 KPI 표시층에서만.
+  const cost = rowCost(row)
   return {
-    sales: parseAmount(row.sales ?? data.sales ?? data.actualPayment),
-    salesQty: parseAmount(row.sales_qty ?? row.salesQty ?? data.salesQty ?? data.quantity),
-    netProfit: parseAmount(row.net_profit ?? row.netProfit ?? data.netProfit ?? data.margin),
+    sales,
+    salesQty,
+    netProfit,
+    cost,
     adSpend: parseAmount(row.ad_spend ?? row.adSpend ?? data.adSpend),
   }
 }
 
-function sheetAdMetrics(row) {
+function sheetFullMetrics(row) {
   const data = row.data && typeof row.data === 'object' ? row.data : {}
+  const sales = parseAmount(row.sales ?? data.sales ?? data.actualPayment)
+  const salesQty = parseAmount(row.sales_qty ?? row.salesQty ?? data.salesQty ?? data.quantity)
+  const netProfit = parseAmount(row.net_profit ?? row.netProfit ?? data.netProfit ?? data.margin)
+  // 합계 원가 칸만. 빈 칸을 매출−마진으로 채우지 않음(빅셀 순이익=수수료 차감 후).
+  const costTotal = parseAmount(row.total_cost ?? data.totalCost ?? data.sales_cost)
   return {
+    sales,
+    salesQty,
+    netProfit,
+    costTotal,
     adSpend: parseAmount(row.ad_spend ?? row.adSpend ?? data.adSpend),
-    adSales: parseAmount(data.adSales ?? data.ad_sales),
+    adSales: parseAmount(data.adSales ?? data.ad_sales ?? row.adSales),
   }
 }
 
-/** 엑셀 합계 행 — upload당 1행 (esserMetrics.dedupeSheetTotalMetrics) */
-function dedupeSheetAdByUpload(sheetRows) {
+/** 엑셀 합계 행 — upload당 1행 (esserMetrics.dedupeSheetTotalsByUpload) */
+function dedupeSheetFullByUpload(sheetRows) {
+  /** @type {Map<string, { metrics: ReturnType<typeof sheetFullMetrics>, kind: string }>} */
   const byUpload = new Map()
   for (const row of sheetRows) {
     const data = row.data && typeof row.data === 'object' ? row.data : {}
-    const key = row.upload_id || row.uploadId || data.sourceFileName || data.fileName || '__single__'
-    const metrics = sheetAdMetrics(row)
+    const key = rowUploadKey(row)
+    const metrics = sheetFullMetrics(row)
     const kind = data.sheetTotalKind || row.sheetTotalKind || 'footer'
     const prev = byUpload.get(key)
     if (!prev) {
@@ -331,24 +363,59 @@ function dedupeSheetAdByUpload(sheetRows) {
     if (prev.kind === 'header') continue
     if (kind === 'header') byUpload.set(key, { metrics, kind })
   }
-  return [...byUpload.values()].map((x) => x.metrics)
+  return byUpload
 }
 
-function applySheetAdToBucket(bucket, sheetRows) {
-  const deduped = dedupeSheetAdByUpload(sheetRows)
-  if (!deduped.length) return
+function dedupeSheetAdByUpload(sheetRows) {
+  return [...dedupeSheetFullByUpload(sheetRows).values()].map((x) => ({
+    adSpend: x.metrics.adSpend,
+    adSales: x.metrics.adSales,
+  }))
+}
+
+/** 합계 행이 있으면 그 값만 버킷에 반영 (상품 원가 보완 없음) */
+function applySheetPreferToBucket(bucket, sheetRows, { replaceAds = true } = {}) {
+  const byUpload = dedupeSheetFullByUpload(sheetRows)
+  if (!byUpload.size) return
   let adSpend = 0
   let adSales = 0
-  for (const m of deduped) {
+  for (const [, { metrics: m }] of byUpload) {
+    bucket.salesTotal += m.sales
+    bucket.quantityTotal += m.salesQty
+    bucket.netProfitTotal += m.netProfit
+    bucket.costTotal += m.costTotal || 0
+    bucket.recordCount += 1
     adSpend += m.adSpend
     adSales += m.adSales
   }
-  bucket.adSpendTotal = adSpend
-  bucket.adSalesTotal = adSales
+  if (replaceAds) {
+    bucket.adSpendTotal = adSpend
+    bucket.adSalesTotal = adSales
+  } else {
+    bucket.adSpendTotal += adSpend
+    bucket.adSalesTotal += adSales
+  }
 }
 
 function rowUploadId(row) {
   return row.upload_id || row.uploadId || ''
+}
+
+function rowUploadKey(row) {
+  const data = row?.data && typeof row.data === 'object' ? row.data : {}
+  return (
+    rowUploadId(row) ||
+    data.sourceFileName ||
+    data.fileName ||
+    row.sourceFileName ||
+    '__single__'
+  )
+}
+
+/** 합계 행이 있는 업로드 — 상품 행 이중 합산 방지 */
+function collectUploadsPreferringSheetSales(rows, range = {}, platformLabel = null) {
+  const sheetRows = selectSheetRowsForKpiAd(rows, range, platformLabel)
+  return new Set(dedupeSheetFullByUpload(sheetRows).keys())
 }
 
 /** 기간 내 상품이 있는 업로드 ID (엑셀 합계 광고 행 연동) */
@@ -389,16 +456,116 @@ export function sumSheetAdMetricsFromDetailRows(rows, range = {}, platformLabel 
   return { adSpend, adSales }
 }
 
+function winningSheetRowsByUpload(sheetRows) {
+  const byUpload = new Map()
+  for (const row of sheetRows || []) {
+    const data = row.data && typeof row.data === 'object' ? row.data : {}
+    const key = rowUploadKey(row)
+    const kind = data.sheetTotalKind || row.sheetTotalKind || 'footer'
+    const prev = byUpload.get(key)
+    if (!prev) {
+      byUpload.set(key, row)
+      continue
+    }
+    const prevData = prev.data && typeof prev.data === 'object' ? prev.data : {}
+    const prevKind = prevData.sheetTotalKind || prev.sheetTotalKind || 'footer'
+    if (prevKind === 'header') continue
+    if (kind === 'header') byUpload.set(key, row)
+  }
+  return [...byUpload.values()]
+}
+
+export function kpiRecordDump(row) {
+  const data = row?.data && typeof row.data === 'object' ? row.data : {}
+  return {
+    id: row?.id ?? null,
+    record_type: row?.record_type ?? row?.recordType ?? null,
+    upload_kind: row?.upload_kind ?? row?.uploadKind ?? null,
+    platform: row?.platform ?? null,
+    resolved_platform: resolvePlatformFromRow(row),
+    sales_method: row?.sales_method ?? row?.salesMethod ?? null,
+    order_date: row?.order_date ?? row?.orderDate ?? null,
+    kpi_date: row?.kpi_date ?? null,
+    business_date: row?.business_date ?? row?.businessDate ?? null,
+    period_from: row?.period_from ?? row?.periodFrom ?? null,
+    period_to: row?.period_to ?? row?.periodTo ?? null,
+    sales: row?.sales ?? null,
+    sales_qty: row?.sales_qty ?? row?.salesQty ?? null,
+    ad_spend: row?.ad_spend ?? row?.adSpend ?? data.adSpend ?? null,
+    ad_sales: data.adSales ?? data.ad_sales ?? row?.adSales ?? null,
+    transaction_type: row?.transaction_type ?? row?.transactionType ?? null,
+    product_name:
+      row?.product_name ||
+      data.productName ||
+      data.product_name ||
+      data['상품명'] ||
+      data.optionName ||
+      null,
+    upload_id: row?.upload_id ?? row?.uploadId ?? null,
+    upload_key:
+      row?.upload_id ||
+      row?.uploadId ||
+      data.sourceFileName ||
+      data.fileName ||
+      row?.sourceFileName ||
+      null,
+    sheetTotalKind: data.sheetTotalKind || null,
+    isEsserSheetTotal: data.isEsserSheetTotal === true,
+    data_date: data.date ?? null,
+    filter_date: resolveKpiFilterDate(row),
+    agg_date: resolveAggregationDate(row),
+  }
+}
+
+/** JS 플랫폼 집계에 실제로 들어가는 record id */
+export function collectPlatformKpiSelectedIds(rows, range = {}) {
+  const preferSheet = collectUploadsPreferringSheetSales(rows, range, null)
+  const productIds = []
+  for (const row of productRows(rows)) {
+    if (!rowMatchesKpiDateRange(row, range)) continue
+    if (preferSheet.has(rowUploadKey(row))) continue
+    if (row.id != null) productIds.push(row.id)
+  }
+  const sheetIds = []
+  for (const label of PLATFORM_SPLIT_LABELS) {
+    const sheetRows = selectSheetRowsForKpiAd(rows, range, label)
+    for (const row of winningSheetRowsByUpload(sheetRows)) {
+      if (row.id != null) sheetIds.push(row.id)
+    }
+  }
+  const adIds = winningSheetRowsByUpload(selectSheetRowsForKpiAd(rows, range, null))
+    .map((row) => row.id)
+    .filter((id) => id != null)
+  return {
+    productIds: [...new Set(productIds)],
+    sheetIds: [...new Set(sheetIds)],
+    adIds: [...new Set(adIds)],
+  }
+}
+
+export function collectDailyKpiSelectedIds(rows, range = {}) {
+  const ids = []
+  for (const row of productRows(rows)) {
+    const date = resolveAggregationDate(row)
+    if (!date) continue
+    if (range.from && date < range.from) continue
+    if (range.to && date > range.to) continue
+    if (row.id != null) ids.push(row.id)
+  }
+  return [...new Set(ids)]
+}
+
 function finalizeBucket(bucket) {
   const sales = bucket.salesTotal || 0
   const qty = bucket.quantityTotal || 0
   const netProfit = bucket.netProfitTotal || 0
+  // 원가 0을 매출−마진으로 채우지 않음 — 음수 마진 시 원가율 100%+ 왜곡 방지
   const cost = bucket.costTotal || 0
   return {
     ...bucket,
     marginRate: sales > 0 ? round2((netProfit / sales) * 100) : 0,
     averageOrderValue: qty > 0 ? round2(sales / qty) : 0,
-    costTotal: cost || Math.max(0, sales - netProfit),
+    costTotal: cost,
   }
 }
 
@@ -407,7 +574,7 @@ function addMetricsToBucket(bucket, m) {
   bucket.quantityTotal += m.salesQty
   bucket.netProfitTotal += m.netProfit
   bucket.adSpendTotal += m.adSpend
-  bucket.costTotal += m.netProfit != null && m.sales != null ? Math.max(m.sales - m.netProfit, 0) : 0
+  bucket.costTotal += m.cost || 0
   bucket.recordCount += 1
 }
 
@@ -441,8 +608,29 @@ function closedMallBrandFromLabel(label) {
   return ''
 }
 
+function saleRowsIncludingSheet(rows) {
+  return (rows || []).filter((r) => !isReturnRow(r))
+}
+
 function platformSubset(rows, label) {
   const list = productRows(rows)
+  if (label === '합계') return list
+  if (isClosedMallKpiLabel(label)) {
+    const seller = closedMallSellerFromLabel(label)
+    const brand = closedMallBrandFromLabel(label)
+    return list.filter((r) => {
+      if (!isClosedMallRow(r)) return false
+      if (brand && resolveClosedMallBrandLabel(r) !== brand) return false
+      if (!seller) return true
+      return resolveClosedMallSeller(r) === seller
+    })
+  }
+  return list.filter((r) => resolvePlatformFromRow(r) === label)
+}
+
+/** 전일대비 — 엑셀 합계 행 포함 (KPI 합계 행 우선과 동일) */
+function platformSubsetForDod(rows, label) {
+  const list = saleRowsIncludingSheet(rows)
   if (label === '합계') return list
   if (isClosedMallKpiLabel(label)) {
     const seller = closedMallSellerFromLabel(label)
@@ -480,13 +668,64 @@ function resolveReferenceDate(rows, range = {}) {
   return maxKey
 }
 
+/**
+ * 일자별 매출 — 업로드에 합계 행이 있으면 합계 행, 없으면 상품 행 합
+ * (esserMetrics.accumulateEsserPreferSheetTotals / aggregateDailyKpiFromRows 와 동일)
+ */
 function buildDailySalesMap(rows, platformLabel) {
-  const map = new Map()
-  for (const row of platformSubset(rows, platformLabel)) {
-    const key = resolveDayOverDayKey(row)
+  const subset = platformSubsetForDod(rows, platformLabel)
+  /** @type {Map<string, object[]>} */
+  const byDay = new Map()
+  for (const row of subset) {
+    const key = resolveDayOverDayKey(row) || resolveAggregationDate(row)
     if (!key) continue
-    const sales = rowMetrics(row).sales
-    map.set(key, (map.get(key) || 0) + sales)
+    if (!byDay.has(key)) byDay.set(key, [])
+    byDay.get(key).push(row)
+  }
+
+  const map = new Map()
+  for (const [day, dayRows] of byDay) {
+    const sheetByUpload = dedupeSheetFullByUpload(dayRows.filter((r) => isSheetTotal(r)))
+    const preferSheet = new Set(sheetByUpload.keys())
+    let sales = 0
+    for (const row of dayRows) {
+      if (isSheetTotal(row)) continue
+      if (preferSheet.has(rowUploadKey(row))) continue
+      sales += rowMetrics(row).sales
+    }
+    for (const [, { metrics }] of sheetByUpload) {
+      sales += metrics.sales
+    }
+    map.set(day, sales)
+  }
+  return map
+}
+
+function buildDailyQuantityMap(rows, platformLabel) {
+  const subset = platformSubsetForDod(rows, platformLabel)
+  /** @type {Map<string, object[]>} */
+  const byDay = new Map()
+  for (const row of subset) {
+    const key = resolveDayOverDayKey(row) || resolveAggregationDate(row)
+    if (!key) continue
+    if (!byDay.has(key)) byDay.set(key, [])
+    byDay.get(key).push(row)
+  }
+
+  const map = new Map()
+  for (const [day, dayRows] of byDay) {
+    const sheetByUpload = dedupeSheetFullByUpload(dayRows.filter((r) => isSheetTotal(r)))
+    const preferSheet = new Set(sheetByUpload.keys())
+    let qty = 0
+    for (const row of dayRows) {
+      if (isSheetTotal(row)) continue
+      if (preferSheet.has(rowUploadKey(row))) continue
+      qty += rowMetrics(row).salesQty
+    }
+    for (const [, { metrics }] of sheetByUpload) {
+      qty += metrics.salesQty
+    }
+    map.set(day, qty)
   }
   return map
 }
@@ -501,19 +740,54 @@ function calcDiffRate(current, previous) {
  * @param {Array<Record<string, unknown>>} rows
  * @param {{ from?: string, to?: string }} [range]
  */
+function resolveSheetUploadDate(uploadKey, sheetRows, allRows) {
+  const sample = (sheetRows || []).find((r) => rowUploadKey(r) === uploadKey)
+  let date = sample ? resolveAggregationDate(sample) || '' : ''
+  if (date) return date
+  for (const row of productRows(allRows)) {
+    if (rowUploadKey(row) !== uploadKey) continue
+    date = resolveAggregationDate(row) || ''
+    if (date) return date
+  }
+  return ''
+}
+
 export function aggregateDailyKpiFromRows(rows, range = {}) {
   const map = new Map()
+  const sheetRows = selectSheetRowsForKpiAd(rows, range, null)
+  const sheetByUpload = dedupeSheetFullByUpload(sheetRows)
+  const preferSheet = new Set(sheetByUpload.keys())
 
   for (const row of productRows(rows)) {
     const date = resolveAggregationDate(row)
     if (!date) continue
     if (range.from && date < range.from) continue
     if (range.to && date > range.to) continue
+    const uploadKey = rowUploadKey(row)
+    if (preferSheet.has(uploadKey)) continue
 
     if (!map.has(date)) {
       map.set(date, { date, ...emptyBucket() })
     }
     addMetricsToBucket(map.get(date), rowMetrics(row))
+  }
+
+  for (const [uploadKey, { metrics: m }] of sheetByUpload) {
+    const date = resolveSheetUploadDate(uploadKey, sheetRows, rows)
+    if (!date) continue
+    if (range.from && date < range.from) continue
+    if (range.to && date > range.to) continue
+    if (!map.has(date)) {
+      map.set(date, { date, ...emptyBucket() })
+    }
+    const bucket = map.get(date)
+    bucket.salesTotal += m.sales
+    bucket.quantityTotal += m.salesQty
+    bucket.netProfitTotal += m.netProfit
+    bucket.costTotal += m.costTotal || 0
+    bucket.recordCount += 1
+    bucket.adSpendTotal += m.adSpend
+    bucket.adSalesTotal += m.adSales
   }
 
   return [...map.values()]
@@ -528,9 +802,12 @@ export function aggregateDailyKpiFromRows(rows, range = {}) {
 export function aggregatePlatformKpiFromRows(rows, range = {}) {
   const metricsMap = new Map()
   const countMap = new Map()
+  const preferSheet = collectUploadsPreferringSheetSales(rows, range, null)
 
   for (const row of productRows(rows)) {
     if (!rowMatchesKpiDateRange(row, range)) continue
+    const uk = rowUploadKey(row)
+    if (preferSheet.has(uk)) continue
 
     const platform = resolvePlatformFromRow(row)
     if (!metricsMap.has(platform)) {
@@ -549,7 +826,7 @@ export function aggregatePlatformKpiFromRows(rows, range = {}) {
     const sheetRows = selectSheetRowsForKpiAd(rows, range, label)
     if (!sheetRows.length) continue
     const bucket = metricsMap.get(label) || { platform: label, ...emptyBucket() }
-    applySheetAdToBucket(bucket, sheetRows)
+    applySheetPreferToBucket(bucket, sheetRows, { replaceAds: true })
     metricsMap.set(label, bucket)
   }
 
@@ -646,16 +923,10 @@ export function compareYesterdayFromRows(rows, opts = {}) {
 
   const items = labels.map((label) => {
     const salesByDay = buildDailySalesMap(rows, label)
+    const quantityMap = buildDailyQuantityMap(rows, label)
     const currentSales = ref ? salesByDay.get(ref) ?? 0 : 0
     const previousSales = prev ? salesByDay.get(prev) ?? 0 : 0
     const salesDiff = currentSales - previousSales
-    const quantityMap = new Map()
-    for (const row of platformSubset(rows, label)) {
-      const key = resolveDayOverDayKey(row)
-      if (!key) continue
-      const qty = rowMetrics(row).salesQty
-      quantityMap.set(key, (quantityMap.get(key) || 0) + qty)
-    }
     const currentQty = ref ? quantityMap.get(ref) ?? 0 : 0
     const previousQty = prev ? quantityMap.get(prev) ?? 0 : 0
 

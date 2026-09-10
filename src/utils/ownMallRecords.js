@@ -1,3 +1,4 @@
+import { partitionOwnMallSales, rebuildExcelSalesFromSources } from './ownMallSalesImport.js'
 import { parseAmount } from './parseAmount.js'
 import { calcOwnMallCardFee } from '../config/ownMall.js'
 import {
@@ -6,6 +7,22 @@ import {
   OWN_MALL_MANUAL_DATA_SOURCE,
   OWN_MALL_MANUAL_PLATFORM,
 } from '../config/ownMallManual.js'
+
+/**
+ * sales 배열이 비어 있고 salesSourceFiles(base64)만 있을 때 KPI용 판매 행 복원
+ * @param {import('../config/ownMallManual.js').OwnMallStore | null | undefined} store
+ */
+export async function resolveOwnMallStoreForKpi(store) {
+  if (!store || typeof store !== 'object') return store
+  const products = store.products || []
+  const sales = store.sales || []
+  const sources = (store.salesSourceFiles || []).filter((f) => f?.dataBase64)
+  if (sales.length || !sources.length) return store
+
+  const { manual } = partitionOwnMallSales(sales)
+  const { excelSales } = await rebuildExcelSalesFromSources(products, sources)
+  return { ...store, sales: [...manual, ...excelSales] }
+}
 
 export {
   parseOwnMallCatalogText,

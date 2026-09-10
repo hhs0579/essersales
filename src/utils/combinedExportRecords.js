@@ -7,18 +7,36 @@ import {
 import { isCoupang1pRocketRecord } from '../config/coupang1pRocket.js'
 import { buildPowerPriceDetailRows } from './powerPriceRecords.js'
 import { buildOwnMallManualDetailRows } from './ownMallRecords.js'
-import { buildCoupang1pDetailRows } from './coupang1pRocketRecords.js'
+import { buildCoupang1pDetailRowsFromStore } from './coupang1pRocketRecords.js'
 
 const BESTHEIM_SOURCE_LABEL = '베스트하임'
 
 export function shouldMergeCoupang1pForExport(scope) {
-  return scope === 'platform' || scope === 'platform_monthly' || isCombinedScope(scope)
+  return (
+    scope === 'platform' ||
+    scope === 'platform_monthly' ||
+    scope === 'company_b' ||
+    scope === 'company_b_monthly' ||
+    isCombinedScope(scope)
+  )
+}
+
+export function shouldMergeOwnMallForExport(scope) {
+  return (
+    scope === 'company_b' ||
+    scope === 'company_b_monthly' ||
+    isCombinedScope(scope)
+  )
 }
 
 /** @param {object} row */
 export function dataSourceLabelForCombinedRow(row) {
   if (isPowerPriceRecord(row)) return POWER_PRICE_DATA_SOURCE_LABEL
-  if (isCoupang1pRocketRecord(row)) return BESTHEIM_SOURCE_LABEL
+  if (isCoupang1pRocketRecord(row)) {
+    const tagged = String(row.dataSourceLabel || '').trim()
+    if (tagged === '사본느리' || row.coupang1pBrandKey === 'esser') return '사본느리'
+    return BESTHEIM_SOURCE_LABEL
+  }
   if (recordMatchesScopeCore(row, 'platform') || recordMatchesScopeCore(row, 'platform_monthly')) {
     return BESTHEIM_SOURCE_LABEL
   }
@@ -39,13 +57,7 @@ export function tagCombinedExportRecords(records) {
 
 function mergeCoupang1pExportRows(records, coupang1pStore) {
   if (!coupang1pStore) return records
-  const c1pRows = buildCoupang1pDetailRows(
-    coupang1pStore.products || [],
-    coupang1pStore.orders || coupang1pStore.sales || [],
-  ).map((r) => ({
-    ...r,
-    dataSourceLabel: BESTHEIM_SOURCE_LABEL,
-  }))
+  const c1pRows = buildCoupang1pDetailRowsFromStore(coupang1pStore)
   if (!c1pRows.length) return records
   return [...records, ...c1pRows]
 }
@@ -64,26 +76,26 @@ export function enrichExportRecords(records, scope, options = {}) {
     list = mergeCoupang1pExportRows(list, coupang1pStore)
   }
 
+  if (combinedIncludesPowerPrice(scope) && powerPriceStore && isCombinedScope(scope)) {
+    const ppRows = buildPowerPriceDetailRows(
+      powerPriceStore.products || [],
+      powerPriceStore.sales || [],
+    ).map((r) => ({
+      ...r,
+      dataSourceLabel: POWER_PRICE_DATA_SOURCE_LABEL,
+    }))
+    list = [...list, ...ppRows]
+  }
+
+  if (shouldMergeOwnMallForExport(scope) && ownMallStore) {
+    const omRows = buildOwnMallManualDetailRows(
+      ownMallStore.products || [],
+      ownMallStore.sales || [],
+    )
+    list = [...list, ...omRows]
+  }
+
   if (isCombinedScope(scope)) {
-    if (combinedIncludesPowerPrice(scope) && powerPriceStore) {
-      const ppRows = buildPowerPriceDetailRows(
-        powerPriceStore.products || [],
-        powerPriceStore.sales || [],
-      ).map((r) => ({
-        ...r,
-        dataSourceLabel: POWER_PRICE_DATA_SOURCE_LABEL,
-      }))
-      list = [...list, ...ppRows]
-    }
-
-    if (ownMallStore) {
-      const omRows = buildOwnMallManualDetailRows(
-        ownMallStore.products || [],
-        ownMallStore.sales || [],
-      )
-      list = [...list, ...omRows]
-    }
-
     return tagCombinedExportRecords(list)
   }
 

@@ -19,7 +19,6 @@ const PG = (process.env.VITE_PG_API_BASE || 'http://localhost:3002/api/v1').repl
 const REQUIRED_SHEETS = [
   '①요약리포트',
   '②전일대비',
-  '②판매방식별',
   '③일별',
   '④주별',
   '⑤월별',

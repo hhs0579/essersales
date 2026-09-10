@@ -11,7 +11,11 @@ import {
 } from '../utils/ownMallRecords.js'
 import { OWN_MALL_CARD_FEE_RATE } from '../config/ownMall.js'
 import { manualAdEntryVisibleInPanel, manualAdHasDateFilter } from '../utils/manualAdSpend.js'
-import { maxReportDateYmd } from '../utils/reportDateRange.js'
+import {
+  resolveManualEntryDefaultDate,
+  resolveManualEntryDateSuggest,
+  applyManualEntryDefaultToEmptyRows,
+} from '../utils/manualEntryDate.js'
 import YmdDateFields from './YmdDateFields.vue'
 import CollapsibleSection from './CollapsibleSection.vue'
 
@@ -62,26 +66,18 @@ async function onSave() {
   }
 }
 
-const singleFilterDate = computed(() => {
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom && dateTo && dateFrom === dateTo) return dateFrom
-  return ''
-})
 
-const saleDateSuggest = computed(() => {
-  if (singleFilterDate.value) return singleFilterDate.value
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom) return dateFrom
-  if (dateTo) return dateTo
-  return maxReportDateYmd()
-})
+const saleDateSuggest = computed(() => resolveManualEntryDateSuggest(props.filterCtx, 'daily'))
 
-watch(singleFilterDate, (date) => {
-  if (!date) return
-  for (const row of store.value.sales) {
-    if (!row.date) row.date = date
-  }
-})
+const newSaleDefaultDate = computed(() => resolveManualEntryDefaultDate(props.filterCtx, 'daily'))
+
+watch(
+  () => newSaleDefaultDate.value,
+  (date) => {
+    if (!date) return
+    applyManualEntryDefaultToEmptyRows(store.value.sales, props.filterCtx, 'daily')
+  },
+)
 
 const productOptions = computed(() => store.value.products.filter((p) => p.name.trim()))
 
@@ -147,7 +143,7 @@ const sortedSales = computed(() =>
 )
 
 function onAddSale() {
-  addSale(singleFilterDate.value || '')
+  addSale(newSaleDefaultDate.value || '')
 }
 
 function applyCatalogImport(parsed, sourceLabel = '') {
@@ -498,8 +494,8 @@ function productPreviewText(product) {
       <h4 class="om-section-title">⑤ 일별 판매 등록</h4>
       <p class="standard-ref section-hint">
         일자·상품·수량을 입력하거나 ③ 엑셀 업로드 결과를 확인·수정할 수 있습니다.
-        <span v-if="singleFilterDate" class="filter-date-hint">
-          조회 일자 <strong>{{ singleFilterDate }}</strong> — 새 행·빈 일자에 자동 적용
+        <span v-if="saleDateSuggest" class="filter-date-hint">
+          조회 기간 자동 적용 — <strong>{{ saleDateSuggest }}</strong>
         </span>
         <span v-else-if="hasDateFilter" class="filter-date-hint">
           조회 기간 —

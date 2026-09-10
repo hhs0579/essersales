@@ -22,6 +22,7 @@ export const ALLOWED_SETTING_KINDS = new Set([
   'profit_loss_template',
   'own_mall_manual',
   'special_sale',
+  'manual_expense',
   'combined_comments',
   'settings_write_regression',
 ])

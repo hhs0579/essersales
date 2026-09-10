@@ -27,14 +27,17 @@ import {
   isManualOnlyChannel,
 
   isClosedMallChannel,
+  isCoupang1pRocketChannel,
 
 } from '../../config/dataChannels.js'
 import { CLOSED_MALL_BRANDS, getClosedMallBrand } from '../../config/closedMall.js'
+import { COUPANG_1P_ROCKET_BRANDS } from '../../config/coupang1pRocket.js'
 
 import { useSalesData } from '../../composables/useSalesData.js'
 import { defaultReportDateRange } from '../../utils/reportDateRange.js'
 
 const closedMallBrandKey = ref('esser')
+const coupang1pBrandKey = ref('bestheim')
 
 
 
@@ -260,7 +263,7 @@ function goDashboard() {
 
       <strong>사본느리 일별</strong> 탭 아래에서 <strong>자사몰 주문·판매 엑셀</strong>도 업로드·관리할 수 있습니다.
 
-      파워프라이스는 엑셀 없이 직접 입력합니다.
+      <strong>쿠팡 1P 로켓</strong>·파워프라이스는 엑셀 없이 직접 입력합니다.
 
     </p>
 
@@ -367,7 +370,7 @@ function goDashboard() {
 
       <p class="standard-ref tab-desc">
 
-        <template v-if="ch.manualOnly || isClosedMallChannel(ch.id)">{{ ch.description }}</template>
+        <template v-if="ch.manualOnly || isClosedMallChannel(ch.id) || isCoupang1pRocketChannel(ch.id)">{{ ch.description }}</template>
 
         <template v-else-if="activeUploadMode === 'monthly'">
 
@@ -393,12 +396,6 @@ function goDashboard() {
 
       <PowerPricePanel
         v-if="ch.manualOnly && ch.id === 'channel_c'"
-        :scope="getMode(ch.id).scope"
-        :filter-ctx="panelFilterCtx"
-      />
-
-      <Coupang1pRocketPanel
-        v-else-if="ch.manualOnly && ch.id === 'channel_d'"
         :scope="getMode(ch.id).scope"
         :filter-ctx="panelFilterCtx"
       />
@@ -453,6 +450,28 @@ function goDashboard() {
             @delete="onDeleteUpload"
           />
         </div>
+      </template>
+
+      <template v-else-if="isCoupang1pRocketChannel(ch.id)">
+        <div class="inner-tabs closed-mall-brand-tabs" role="tablist" aria-label="쿠팡 1P 브랜드">
+          <button
+            v-for="b in COUPANG_1P_ROCKET_BRANDS"
+            :key="b.key"
+            type="button"
+            class="inner-tab"
+            :class="{ active: coupang1pBrandKey === b.key }"
+            role="tab"
+            :aria-selected="coupang1pBrandKey === b.key"
+            @click="coupang1pBrandKey = b.key"
+          >
+            {{ b.tabLabel }}
+          </button>
+        </div>
+        <p class="standard-ref brand-panel-hint">
+          <strong>{{ COUPANG_1P_ROCKET_BRANDS.find((b) => b.key === coupang1pBrandKey)?.tabLabel }}</strong>
+          전용 상품 리스트·발주 내역입니다. 다른 브랜드와 데이터가 섞이지 않습니다.
+        </p>
+        <Coupang1pRocketPanel :brand-key="coupang1pBrandKey" :filter-ctx="panelFilterCtx" />
       </template>
 
       <template v-else>
@@ -739,7 +758,11 @@ function goDashboard() {
 
 }
 
-
+.brand-panel-hint {
+  margin: 0 0 14px;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
 
 .history-hint {
 

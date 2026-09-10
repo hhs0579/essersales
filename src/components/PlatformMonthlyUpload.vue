@@ -2,7 +2,6 @@
 import { ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import { parsePlatformMonthlyInWorker } from '../utils/parseExcelInWorker.js'
 import {
   deleteUploadAndRecords,
   fetchUploads,
@@ -12,6 +11,7 @@ import {
   detectPlatformFromFileName,
   resolveUploadPlatform,
 } from '../utils/platformDetect.js'
+import { formatPlatformUploadSuccess } from '../utils/uploadSuccessMessage.js'
 
 const props = defineProps({
   /** DB uploads.upload_kind — platform_monthly | sales_monthly_b */
@@ -43,39 +43,13 @@ async function onFilesSelected(fileList) {
     let total = 0
     for (const [idx, file] of fileList.entries()) {
       const filePrefix = fileList.length > 1 ? `[${idx + 1}/${fileList.length}] ` : ''
-      const fromName = detectPlatformFromFileName(file.name)
+      const fileName = file.name
+      progressMessage.value = `${filePrefix}파일 선택 완료 (${fileName})`
+      await yieldTick()
+
+      const fromName = detectPlatformFromFileName(fileName)
       if (fromName) platform.value = fromName
-
-      progressMessage.value = `${filePrefix}엑셀 파일 파싱 및 포맷 검증 중...`
-      await yieldTick()
-
-      const {
-        fileName,
-        platform: p,
-        businessDate,
-        periodFrom,
-        periodTo,
-        periodLabel,
-        details,
-        skipped,
-        skippedSummary = 0,
-        skippedNoDate = 0,
-        format,
-        salesMethod,
-        dateRangeHint,
-      } = await parsePlatformMonthlyInWorker(file, platform.value)
-
-      progressMessage.value = `${filePrefix}데이터 정제 및 분석 중...`
-      await yieldTick()
-
-      const resolvedPlatform = resolveUploadPlatform(fileName, p, details)
-      if (!details.length) {
-        let hint = '파일명 기간·상품·매출 열을 확인하세요.'
-        if (skippedNoDate > 0) {
-          hint = `날짜를 읽지 못한 행 ${skippedNoDate}건. 날짜 열 또는 파일명(…_20260601_20260630)을 확인하세요.`
-        }
-        throw new Error(`「${fileName}」에서 저장할 행을 찾지 못했습니다. ${hint}`)
-      }
+      const resolvedPlatform = resolveUploadPlatform(fileName, platform.value, [])
 
       progressMessage.value = `${filePrefix}기존 중복 데이터 검사 중...`
       await yieldTick()
@@ -88,29 +62,25 @@ async function onFilesSelected(fileList) {
         await deleteUploadAndRecords(u.id)
       }
 
-      progressMessage.value = `${filePrefix}서버 DB에 월간 데이터 저장 중...`
+      progressMessage.value = `${filePrefix}업로드 중...`
       await yieldTick()
+      progressMessage.value = `${filePrefix}서버 처리 중...`
 
-      const { count } = await savePlatformMonthlyUpload({
+      const { count, parseMeta, salesMethod, platform: savedPlatform } = await savePlatformMonthlyUpload({
         file,
         fileName,
         platform: resolvedPlatform,
-        businessDate,
-        periodFrom,
-        periodTo,
-        details,
-        salesMethod: salesMethod || '',
         uploadKind: props.uploadKind,
       })
       total += count
-      const skipParts = []
-      if (skipped > 0) skipParts.push(`미저장 ${skipped}행`)
-      if (skippedSummary > 0) skipParts.push(`합계행 제외 ${skippedSummary}`)
-      const skipNote = skipParts.length ? ` (${skipParts.join(', ')})` : ''
-      const formatLabel = format === 'coupang_esser_monthly' ? ' · 빅셀 매출분석(월별)' : ''
-      const methodLabel = salesMethod ? ` · ${salesMethod}` : ''
-      const rangeLabel = dateRangeHint || periodLabel || ''
-      success.value = `${fileList.length}개 파일 · ${resolvedPlatform}${formatLabel}${methodLabel} · 기간 ${rangeLabel} · 총 ${total}건 저장${skipNote}`
+      success.value = formatPlatformUploadSuccess({
+        fileCount: fileList.length,
+        platform: savedPlatform || parseMeta?.platform || resolvedPlatform,
+        parseMeta,
+        total,
+        kind: 'monthly',
+        salesMethod,
+      })
     }
     emit('uploaded')
   } catch (e) {

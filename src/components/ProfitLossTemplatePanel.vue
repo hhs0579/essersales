@@ -93,7 +93,7 @@ function phField(key) {
 <template>
   <CollapsibleSection
     title="통합 매출 손익계산 리포트 · 형식 업로드"
-    subtitle="통합 엑셀 ①요약리포트는 손익계산 고정 양식(외부광고·KPI·판매방식·스토어·일별)으로 자동 생성됩니다. 추가 맞춤 양식은 선택 업로드."
+    subtitle="통합 엑셀 ①요약리포트는 손익계산 고정 양식(외부광고·KPI·스토어·일별)으로 자동 생성됩니다. 추가 맞춤 양식은 선택 업로드."
     :default-collapsed="hasTemplate"
   >
     <div class="pl-template-panel">

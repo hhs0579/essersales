@@ -453,7 +453,7 @@ function paintIntegratedDualBlockDataRow(row, values, fontSize = 12) {
   row.height = 22
 }
 
-/** ①요약리포트 — 블록 제목 (손익·판매방식·스토어·일별) */
+/** ①요약리포트 — 블록 제목 (손익·스토어·일별; 구버전 판매방식 제목도 인식) */
 function isIntegratedBlockTitleRow(row, nextRow) {
   if (isIntegratedDualBlockTitleRow(row)) return false
   if (row.length > 1 && cellText(row[1])) return false

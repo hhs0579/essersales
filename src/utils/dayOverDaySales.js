@@ -7,26 +7,37 @@ import { aggregateEsserByDayWithManual } from './manualAdSpend.js'
 import { formatEsserValue } from './esserMetrics.js'
 import {
   DAY_OVER_DAY_BRAND_LABELS,
-  resolveCombinedBrandRollupLabel,
+  resolveCombinedBrandDodLabel,
   withRecordSourceLabel,
 } from './recordSourceLabel.js'
 import {
   COMBINED_DAY_OVER_DAY_LABELS,
+  combinedBrandDodKeyFromSegmentLabel,
   combinedDayOverDayLabelsForRecords,
   closedMallKpiLabelsFromRecords,
   recordsForCombinedSegmentLabel,
 } from './combinedKpiSegments.js'
 import { isClosedMallKpiLabel, isClosedMallRecord, OTHER_SELLERS_BRAND_LABEL } from '../config/closedMall.js'
+import { isManualAdKpiLabel } from '../config/manualAdSpend.js'
+import { isManualExpenseSegmentKind } from './manualExpenseKpi.js'
+import { SPECIAL_SALE_LABEL } from '../config/specialSale.js'
+import {
+  collectSpecialSaleRowLabelsFromMonthlyMap,
+  getSpecialSaleDisplayLabels,
+  padMonthKey,
+  salesTotalFromSpecialSale,
+} from './specialSaleKpi.js'
 
 export { DAY_OVER_DAY_BRAND_LABELS } from './recordSourceLabel.js'
 export { COMBINED_DAY_OVER_DAY_LABELS } from './combinedKpiSegments.js'
 
-/** 통합 ①요약리포트·전일대비 — 브랜드 + 기타 판매처 + 합계 */
+/** 통합 ①요약리포트·전월대비 — 에쎄르에 사본느리 포함 */
 export const COMBINED_BRAND_DAY_OVER_DAY_LABELS = [
   '베스트하임',
-  '사본느리',
+  '에쎄르',
   '파워프라이스',
   OTHER_SELLERS_BRAND_LABEL,
+  SPECIAL_SALE_LABEL,
   '합계',
 ]
 
@@ -173,15 +184,20 @@ function filterSaleProductRows(rows) {
   return (rows || []).filter((r) => !isReturnRecord(r) && !isEsserSheetTotalRecord(r))
 }
 
+/** 전일대비·일별 매출 — 엑셀 합계 행 포함 (summarizeEsserKpis 합계 우선과 동일) */
+function filterSaleRowsWithSheetTotals(rows) {
+  return (rows || []).filter((r) => !isReturnRecord(r))
+}
+
 function tagSourceLabels(rows) {
   return (rows || []).map(withRecordSourceLabel)
 }
 
 function platformSubset(rows, label) {
-  const list = filterSaleProductRows(rows)
+  const list = filterSaleRowsWithSheetTotals(rows)
   if (label === '합계') return list
   if (isClosedMallKpiLabel(label)) {
-    return filterSaleProductRows(recordsForCombinedSegmentLabel(rows, label))
+    return filterSaleRowsWithSheetTotals(recordsForCombinedSegmentLabel(rows, label))
   }
   return list.filter((r) => resolveRecordPlatform(r) === label)
 }
@@ -198,7 +214,7 @@ function dayOverDayLabelsForRows(rows) {
 function brandSubset(rows, label) {
   const list = filterSaleProductRows(rows)
   if (label === '합계') return list
-  return list.filter((r) => resolveCombinedBrandRollupLabel(r) === label)
+  return list.filter((r) => resolveCombinedBrandDodLabel(r) === label)
 }
 
 function manualCtxForPlatform(baseCtx, label) {
@@ -281,11 +297,14 @@ function buildDayOverDayResult(label, salesByDay, ref, prev, options = {}) {
     prevMonth = options.prevMonth || (refMonth ? addMonthsToMonthKey(refMonth, -1) : '')
     currentSales = refMonth ? monthMap.get(refMonth) ?? 0 : 0
     prevSales = prevMonth ? monthMap.get(prevMonth) ?? 0 : 0
-    // 월별 총 매출 = 일별 합 + 해당 월 특판 (합계 행에만 가산)
     const ss = options.specialSaleByMonth
-    if (ss && label === '합계') {
-      currentSales += (refMonth && ss.get(refMonth)) || 0
-      prevSales += (prevMonth && ss.get(prevMonth)) || 0
+    if (ss && label === SPECIAL_SALE_LABEL) {
+      // 특판 행 = 해당 월 수기 특판 총합 (키가 없으면 0 — ?? 로 0원과 미존재 구분)
+      currentSales = specialSaleAmountFromMonthlyMap(ss, refMonth) ?? 0
+      prevSales = specialSaleAmountFromMonthlyMap(ss, prevMonth) ?? 0
+    } else if (ss && label === '합계') {
+      currentSales += specialSaleAmountFromMonthlyMap(ss, refMonth) ?? 0
+      prevSales += specialSaleAmountFromMonthlyMap(ss, prevMonth) ?? 0
     }
     ref = refMonth
     prev = prevMonth
@@ -428,17 +447,52 @@ function resolveComparisonContext(manualFilterCtx, referenceDateKey, rows, extra
   }
 }
 
+/** 특판 월별 매출 합계 맵 (YYYY-MM → 매출) — Map 또는 plain object */
+export function specialSaleAmountFromMonthlyMap(ss, monthKey) {
+  if (!ss) return undefined
+  const padded = padMonthKey(monthKey)
+  const keys = [padded, monthKey].filter(Boolean)
+  if (padded) {
+    const loose = padded.replace(/-0(\d)$/, '-$1')
+    if (loose !== padded) keys.push(loose)
+  }
+  const read = (k) => {
+    if (typeof ss.get === 'function') {
+      if (typeof ss.has === 'function' && ss.has(k)) return Number(ss.get(k)) || 0
+      const v = ss.get(k)
+      if (v != null) return Number(v) || 0
+      return undefined
+    }
+    if (Object.prototype.hasOwnProperty.call(ss, k)) return Number(ss[k]) || 0
+    return undefined
+  }
+  for (const k of keys) {
+    const v = read(k)
+    if (v != null) return v
+  }
+  return undefined
+}
+
+export function specialSaleMonthlyTotalsSize(ss) {
+  if (!ss) return 0
+  if (typeof ss.size === 'number') return ss.size
+  return Object.keys(ss).length
+}
+
 /** 특판 월별 매출 합계 맵 (YYYY-MM → 매출) — computeXxx options.specialSaleByMonth 용 */
 export function buildSpecialSaleMonthlyTotals(monthlyEntries) {
   const map = new Map()
   if (!monthlyEntries || typeof monthlyEntries !== 'object') return map
-  for (const [monthKey, entries] of Object.entries(monthlyEntries)) {
+  const pairs =
+    monthlyEntries instanceof Map ? monthlyEntries.entries() : Object.entries(monthlyEntries)
+  for (const [monthKey, entries] of pairs) {
     let total = 0
     for (const e of entries || []) {
       const n = Number(String(e?.sales ?? '').replace(/[^0-9.-]/g, ''))
       if (Number.isFinite(n)) total += n
     }
-    if (total) map.set(monthKey, total)
+    const padded = padMonthKey(monthKey) || String(monthKey || '')
+    if (padded && total) map.set(padded, (map.get(padded) || 0) + total)
   }
   return map
 }
@@ -469,6 +523,187 @@ export function computeDayOverDaySales(rows, options = {}) {
       platform,
     )
     return buildDayOverDayResult(platform, salesByDay, ctx.ref, ctx.prev, ctx.buildOptions)
+  })
+}
+
+/** 고정 세그먼트 라벨 → 전월대비 브랜드 */
+function isSpecialSaleSegmentRow(row, ssLabels) {
+  const label = String(row?.label || '').trim()
+  if (!label) return false
+  if (row?.kind === 'special_sale' || row?.segmentKey === 'special_sale') return true
+  if (label === SPECIAL_SALE_LABEL) return true
+  return ssLabels.has(label)
+}
+
+/**
+ * 통합 세그먼트 KPI 행 → 브랜드·특판 매출
+ * @param {Array<{ label?: string, kind?: string, profit?: { sales?: number } }>} rows
+ * @param {number | null | undefined} specialSaleOverride 수기 특판 총합(있으면 특판 행에 우선)
+ * @param {Iterable<string> | null} [specialSaleLabels] 커스텀 특판 행 라벨
+ * @returns {Map<string, number>}
+ */
+export function rollupCombinedBrandSalesFromSegmentRows(
+  rows,
+  specialSaleOverride = undefined,
+  specialSaleLabels = null,
+) {
+  const map = new Map(COMBINED_BRAND_DAY_OVER_DAY_LABELS.map((l) => [l, 0]))
+  const ssLabels = specialSaleLabels instanceof Set ? specialSaleLabels : new Set(specialSaleLabels || [])
+  let ssFromRows = 0
+  for (const row of rows || []) {
+    const label = String(row?.label || '').trim()
+    if (!label || label === '합계' || isManualAdKpiLabel(label)) continue
+    if (isManualExpenseSegmentKind(row)) continue
+    const sales = Math.round(Number(row?.profit?.sales || 0))
+    if (isSpecialSaleSegmentRow(row, ssLabels)) {
+      ssFromRows += sales
+      continue
+    }
+    const brand = combinedBrandDodKeyFromSegmentLabel(label)
+    if (!brand || !map.has(brand) || brand === SPECIAL_SALE_LABEL) continue
+    map.set(brand, (map.get(brand) || 0) + sales)
+  }
+  const ss =
+    specialSaleOverride != null && Number.isFinite(Number(specialSaleOverride))
+      ? Math.round(Number(specialSaleOverride))
+      : ssFromRows
+  map.set(SPECIAL_SALE_LABEL, ss)
+  let sum = 0
+  for (const [k, v] of map) {
+    if (k !== '합계') sum += v
+  }
+  map.set('합계', sum)
+  return map
+}
+
+function segmentTotalSales(rows) {
+  const total = (rows || []).find((r) => String(r?.label || '').trim() === '합계')
+  if (!total) return null
+  const n = Number(total?.profit?.sales)
+  return Number.isFinite(n) ? Math.round(n) : null
+}
+
+function collectSpecialSaleLabelsForRollup(currentRows, prevRows, options = {}) {
+  const labels = new Set(options.specialSaleLabels || [])
+  for (const label of collectSpecialSaleRowLabelsFromMonthlyMap(
+    options.manualFilterCtx?.specialSaleMonthlyMap,
+  )) {
+    labels.add(label)
+  }
+  for (const label of getSpecialSaleDisplayLabels(options.manualFilterCtx?.specialSale)) {
+    labels.add(label)
+  }
+  for (const label of getSpecialSaleDisplayLabels(options.manualFilterCtx?.specialSalePrev)) {
+    labels.add(label)
+  }
+  for (const row of [...(currentRows || []), ...(prevRows || [])]) {
+    if (!isSpecialSaleSegmentRow(row, labels)) continue
+    const label = String(row?.label || '').trim()
+    if (label) labels.add(label)
+  }
+  return labels
+}
+
+function resolveSpecialSaleOverride(ss, monthKey, snapshot) {
+  const fromMap = specialSaleAmountFromMonthlyMap(ss, monthKey)
+  if (fromMap != null) return fromMap
+  const fromSnap = salesTotalFromSpecialSale(snapshot)
+  if (fromSnap > 0) return fromSnap
+  return undefined
+}
+
+function brandMapHasMarketplaceSales(map) {
+  if (!map) return false
+  for (const [k, v] of map) {
+    if (k === '합계' || k === SPECIAL_SALE_LABEL) continue
+    if (Number(v) > 0) return true
+  }
+  return false
+}
+
+/**
+ * lookup records → 브랜드별 전월 매출 맵 (세그먼트 전월이 비었을 때 보완용)
+ * @param {object[]} lookupRows
+ * @param {object} [options]
+ * @returns {Map<string, number>}
+ */
+export function brandPrevSalesMapFromLookupRecords(lookupRows, options = {}) {
+  const dod = computeCombinedBrandDayOverDaySales([], {
+    manualFilterCtx: options.manualFilterCtx || {},
+    lookupRows: lookupRows || [],
+    specialSaleByMonth: options.specialSaleByMonth || null,
+  })
+  const map = new Map(COMBINED_BRAND_DAY_OVER_DAY_LABELS.map((l) => [l, 0]))
+  for (const row of dod) {
+    const label = row?.platform
+    if (!map.has(label)) continue
+    map.set(label, Math.round(Number(row.prevSales) || 0))
+  }
+  return map
+}
+
+function applyPrevBrandSalesFallback(prevMap, fallback) {
+  if (!fallback) return prevMap
+  const read = (label) => {
+    if (typeof fallback.get === 'function') return fallback.get(label)
+    return fallback[label]
+  }
+  const ssKeep = Number(prevMap.get(SPECIAL_SALE_LABEL) || 0)
+  for (const label of COMBINED_BRAND_DAY_OVER_DAY_LABELS) {
+    if (label === SPECIAL_SALE_LABEL && ssKeep > 0) continue
+    const v = read(label)
+    if (v == null) continue
+    prevMap.set(label, Math.round(Number(v) || 0))
+  }
+  return prevMap
+}
+
+/**
+ * 서버 by-segment(당월·전월) → 통합 브랜드 전월대비 (특판 행 + 합계 포함)
+ * @param {object[]} currentRows
+ * @param {object[]} prevRows
+ * @param {object} [options]
+ * @param {Map<string, number>|Record<string, number>} [options.prevBrandSalesFallback] 전월 세그먼트 없을 때 records 전월
+ */
+export function buildCombinedBrandMonthOverMonthFromSegmentRows(
+  currentRows,
+  prevRows,
+  options = {},
+) {
+  const manualFilterCtx = options.manualFilterCtx || {}
+  const ss = options.specialSaleByMonth || null
+  const ssLabels = collectSpecialSaleLabelsForRollup(currentRows, prevRows, options)
+  const refMonth = resolveReferenceMonthKey([], manualFilterCtx)
+  const prevMonth = refMonth ? addMonthsToMonthKey(refMonth, -1) : ''
+  const currentSs = resolveSpecialSaleOverride(ss, refMonth, manualFilterCtx.specialSale)
+  const prevSs = resolveSpecialSaleOverride(ss, prevMonth, manualFilterCtx.specialSalePrev)
+  const currentMap = rollupCombinedBrandSalesFromSegmentRows(currentRows, currentSs, ssLabels)
+  const prevMap = rollupCombinedBrandSalesFromSegmentRows(prevRows, prevSs, ssLabels)
+
+  // 당월 합계 = 매출·수익 섹션 합계 행과 동일 SoT
+  const currentTotal = segmentTotalSales(currentRows)
+  const prevTotal = segmentTotalSales(prevRows)
+  if (currentTotal != null) currentMap.set('합계', currentTotal)
+  if (prevTotal != null && brandMapHasMarketplaceSales(prevMap)) {
+    prevMap.set('합계', prevTotal)
+  }
+
+  // 전월 by-segment 비어 있으면 lookup records 전월으로 보완 (0원 방지)
+  if (!brandMapHasMarketplaceSales(prevMap) && options.prevBrandSalesFallback) {
+    applyPrevBrandSalesFallback(prevMap, options.prevBrandSalesFallback)
+  }
+
+  return COMBINED_BRAND_DAY_OVER_DAY_LABELS.map((label) => {
+    const salesByDay = new Map()
+    if (refMonth) salesByDay.set(`${refMonth}-01`, currentMap.get(label) || 0)
+    if (prevMonth) salesByDay.set(`${prevMonth}-01`, prevMap.get(label) || 0)
+    return buildDayOverDayResult(label, salesByDay, refMonth, prevMonth, {
+      comparisonMode: 'month',
+      refMonth,
+      prevMonth,
+      // 특판·합계는 이미 map에 반영 — 이중 가산 금지
+      specialSaleByMonth: null,
+    })
   })
 }
 

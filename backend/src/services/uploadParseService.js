@@ -18,7 +18,7 @@ import {
 } from '../utils/recordBuilder.js'
 import { parseBusinessDateRange } from '../utils/recordBackfill.js'
 
-const DAILY_KINDS = new Set(['platform_daily', 'sales_daily_b', '__test__'])
+const DAILY_KINDS = new Set(['platform_daily', 'sales_daily_b'])
 const PERIOD_KINDS = new Set(['platform_period', 'sales_period_b'])
 const MONTHLY_KINDS = new Set(['platform_monthly', 'sales_monthly_b'])
 const CLOSED_MALL_KINDS = new Set(CLOSED_MALL_UPLOAD_KINDS)
@@ -171,8 +171,13 @@ function buildFromPlatformParsed(parsed, { uploadKind, salesMethod, uploadFormat
     parseMeta: {
       format: parsed.format,
       platform: parsed.platform,
-      skipped: parsed.skipped,
-      skippedSummary: parsed.skippedSummary,
+      salesMethod: parsed.salesMethod || salesMethod || '',
+      skipped: parsed.skipped || 0,
+      skippedSummary: parsed.skippedSummary || 0,
+      skippedNoDate: parsed.skippedNoDate || 0,
+      dateRangeHint: parsed.dateRangeHint || parsed.periodLabel || '',
+      periodLabel: parsed.periodLabel || '',
+      emptyHint: parsed.emptyHint || '',
     },
   }
 }

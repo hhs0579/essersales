@@ -62,8 +62,9 @@ function guessBusinessDate(fileName, details) {
 /**
  * @param {{ fileName: string, headers: string[], rows: object[] }} excel
  * @param {string} platform
+ * @param {{ allowZeroSalesProducts?: boolean }} [options]
  */
-export function readPlatformDailyFromExcel(excel, platform) {
+export function readPlatformDailyFromExcel(excel, platform, options = {}) {
   const { fileName, headers, rows } = excel
   const fallbackPlatform =
     detectPlatformFromFileName(fileName) || normalizePlatformLabel(platform)
@@ -84,7 +85,7 @@ export function readPlatformDailyFromExcel(excel, platform) {
 
   if (isCoupangEsserFormat(headers)) {
     return finalizeParsedDailyUpload(
-      parseCoupangEsserDaily(fileName, headers, rows, fallbackPlatform),
+      parseCoupangEsserDaily(fileName, headers, rows, fallbackPlatform, options),
     )
   }
 
@@ -116,24 +117,26 @@ export function readPlatformDailyFromExcel(excel, platform) {
 /**
  * 플랫폼 일일 주문 엑셀 → 상세 거래 레코드 목록
  */
-export async function readPlatformDailyFile(file, platform) {
+export async function readPlatformDailyFile(file, platform, options = {}) {
   const excel = await readExcelFile(file)
-  return readPlatformDailyFromExcel(excel, platform)
+  return readPlatformDailyFromExcel(excel, platform, options)
 }
 
 /** @param {ArrayBuffer | Uint8Array | Buffer} buffer */
-export async function readPlatformDailyBuffer(buffer, fileName, platform) {
+export async function readPlatformDailyBuffer(buffer, fileName, platform, options = {}) {
   const excel = await readExcelBuffer(buffer, fileName)
-  return readPlatformDailyFromExcel(excel, platform)
+  return readPlatformDailyFromExcel(excel, platform, options)
 }
 
 /** 플랫폼 월별 매출 엑셀 (파일명 1일~말일) */
-export async function readPlatformMonthlyFromExcel(excel, platform) {
+export async function readPlatformMonthlyFromExcel(excel, platform, options = {}) {
   const { fileName, headers, rows } = excel
   const fallbackPlatform = normalizePlatformLabel(platform)
 
   if (isCoupangEsserFormat(headers)) {
-    return finalizeParsedDailyUpload(parseCoupangEsserMonthly(fileName, headers, rows, fallbackPlatform))
+    return finalizeParsedDailyUpload(
+      parseCoupangEsserMonthly(fileName, headers, rows, fallbackPlatform, options),
+    )
   }
 
   throw new Error(
@@ -141,24 +144,24 @@ export async function readPlatformMonthlyFromExcel(excel, platform) {
   )
 }
 
-export async function readPlatformMonthlyFile(file, platform) {
+export async function readPlatformMonthlyFile(file, platform, options = {}) {
   const excel = await readExcelFile(file)
-  return readPlatformMonthlyFromExcel(excel, platform)
+  return readPlatformMonthlyFromExcel(excel, platform, options)
 }
 
 /** @param {ArrayBuffer | Uint8Array | Buffer} buffer */
-export async function readPlatformMonthlyBuffer(buffer, fileName, platform) {
+export async function readPlatformMonthlyBuffer(buffer, fileName, platform, options = {}) {
   const excel = await readExcelBuffer(buffer, fileName)
-  return readPlatformMonthlyFromExcel(excel, platform)
+  return readPlatformMonthlyFromExcel(excel, platform, options)
 }
 
 /** 플랫폼 기간 매출 엑셀 (파일명에 시작·종료일) */
-export async function readPlatformPeriodFromExcel(excel, platform) {
+export async function readPlatformPeriodFromExcel(excel, platform, options = {}) {
   const { fileName, headers, rows } = excel
   const fallbackPlatform = normalizePlatformLabel(platform)
 
   if (isCoupangEsserFormat(headers)) {
-    return parseCoupangEsserPeriod(fileName, headers, rows, fallbackPlatform)
+    return parseCoupangEsserPeriod(fileName, headers, rows, fallbackPlatform, options)
   }
 
   throw new Error(
@@ -166,13 +169,13 @@ export async function readPlatformPeriodFromExcel(excel, platform) {
   )
 }
 
-export async function readPlatformPeriodFile(file, platform) {
+export async function readPlatformPeriodFile(file, platform, options = {}) {
   const excel = await readExcelFile(file)
-  return readPlatformPeriodFromExcel(excel, platform)
+  return readPlatformPeriodFromExcel(excel, platform, options)
 }
 
 /** @param {ArrayBuffer | Uint8Array | Buffer} buffer */
-export async function readPlatformPeriodBuffer(buffer, fileName, platform) {
+export async function readPlatformPeriodBuffer(buffer, fileName, platform, options = {}) {
   const excel = await readExcelBuffer(buffer, fileName)
-  return readPlatformPeriodFromExcel(excel, platform)
+  return readPlatformPeriodFromExcel(excel, platform, options)
 }

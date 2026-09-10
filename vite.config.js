@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api/v1': {
-        target: 'http://localhost:3002',
+        target: process.env.ESSERSALES_DEV_API || 'http://192.168.0.245:8080',
         changeOrigin: true,
       },
     },

@@ -3,6 +3,7 @@ import {
   isValidSettingKind,
 } from '../constants/appSettings.js'
 import { getSetting, upsertSetting } from '../repositories/settingsRepository.js'
+import { OWN_MALL_MANUAL_SETTING_KIND } from '../../../src/config/ownMallManual.js'
 
 function assertScopeKind(scope, kind) {
   if (!isValidSettingScope(scope) || !isValidSettingKind(kind)) {
@@ -27,6 +28,59 @@ export function formatSettingResponse(row) {
 }
 
 /**
+ * omit_sources 클라이언트가 base64 없이 PUT 해도 DB 원본 엑셀을 지우지 않음
+ * @param {unknown} incoming
+ * @param {unknown} existing
+ */
+export function mergeOwnMallManualPreserveSources(incoming, existing) {
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
+  if (!existing || typeof existing !== 'object' || Array.isArray(existing)) return incoming
+
+  const next = /** @type {Record<string, unknown>} */ ({ ...incoming })
+  const prev = /** @type {Record<string, unknown>} */ (existing)
+  const nextFiles = Array.isArray(next.salesSourceFiles) ? next.salesSourceFiles : []
+  const prevFiles = Array.isArray(prev.salesSourceFiles) ? prev.salesSourceFiles : []
+
+  if (!prevFiles.length) return incoming
+
+  const prevById = new Map()
+  const prevByName = new Map()
+  for (const item of prevFiles) {
+    if (!item || typeof item !== 'object') continue
+    const f = /** @type {Record<string, unknown>} */ (item)
+    const b64 = typeof f.dataBase64 === 'string' ? f.dataBase64 : ''
+    if (!b64) continue
+    if (typeof f.id === 'string' && f.id) prevById.set(f.id, f)
+    if (typeof f.fileName === 'string' && f.fileName) prevByName.set(f.fileName, f)
+  }
+
+  // 클라이언트가 파일 목록을 비웠는데 서버에 원본이 있으면 원본 유지
+  if (!nextFiles.length && prevById.size + prevByName.size > 0) {
+    next.salesSourceFiles = prevFiles
+    if (!Array.isArray(next.sales) || next.sales.length === 0) {
+      if (Array.isArray(prev.sales) && prev.sales.length) next.sales = prev.sales
+    }
+    return next
+  }
+
+  next.salesSourceFiles = nextFiles.map((item) => {
+    if (!item || typeof item !== 'object') return item
+    const f = /** @type {Record<string, unknown>} */ ({ ...item })
+    const hasB64 = typeof f.dataBase64 === 'string' && f.dataBase64.length > 0
+    if (hasB64) return f
+    const id = typeof f.id === 'string' ? f.id : ''
+    const name = typeof f.fileName === 'string' ? f.fileName : ''
+    const from = (id && prevById.get(id)) || (name && prevByName.get(name)) || null
+    if (from && typeof from.dataBase64 === 'string') {
+      f.dataBase64 = from.dataBase64
+    }
+    return f
+  })
+
+  return next
+}
+
+/**
  * @param {string} scope
  * @param {string} kind
  * @param {{ omitSources?: boolean }} [opts]
@@ -47,6 +101,11 @@ export async function getAppSetting(scope, kind, opts = {}) {
  */
 export async function putAppSetting(scope, kind, data) {
   assertScopeKind(scope, kind)
-  const row = await upsertSetting(scope, kind, data)
+  let payload = data
+  if (kind === OWN_MALL_MANUAL_SETTING_KIND) {
+    const existing = await getSetting(scope, kind)
+    payload = mergeOwnMallManualPreserveSources(data, existing?.data ?? null)
+  }
+  const row = await upsertSetting(scope, kind, payload)
   return formatSettingResponse(row)
 }

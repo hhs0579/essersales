@@ -46,6 +46,7 @@ services:
     environment:
       NODE_ENV: production
       API_PORT: 3001
+      NODE_OPTIONS: "--max-old-space-size=768"
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${DB_NAME:-essersales}
@@ -59,6 +60,12 @@ services:
       - ./data/exports:/app/data/exports
       - ./data/backups:/app/data/backups
       - ./infra/db:/app/infra/db:ro
+      # deploy-to-nas.ps1 복사분 즉시 반영 (재빌드 없이 restart api 만으로 적용)
+      - ./backend/src:/app/backend/src:ro
+      - ./src/utils:/app/src/utils:ro
+      - ./src/config:/app/src/config:ro
+      - ./src/constants:/app/src/constants:ro
+      - ./src/services/adapters:/app/src/services/adapters:ro
     depends_on:
       db:
         condition: service_healthy

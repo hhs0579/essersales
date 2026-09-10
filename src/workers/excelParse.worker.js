@@ -8,15 +8,15 @@ import {
 } from '../utils/platformOrderParser.js'
 
 self.onmessage = async (event) => {
-  const { id, type, buffer, fileName, platform } = event.data || {}
+  const { id, type, buffer, fileName, platform, options = {} } = event.data || {}
   try {
     let result
     if (type === 'platform_daily') {
-      result = await readPlatformDailyBuffer(buffer, fileName, platform)
+      result = await readPlatformDailyBuffer(buffer, fileName, platform, options)
     } else if (type === 'platform_monthly') {
-      result = await readPlatformMonthlyBuffer(buffer, fileName, platform)
+      result = await readPlatformMonthlyBuffer(buffer, fileName, platform, options)
     } else if (type === 'platform_period') {
-      result = await readPlatformPeriodBuffer(buffer, fileName, platform)
+      result = await readPlatformPeriodBuffer(buffer, fileName, platform, options)
     } else {
       throw new Error(`unsupported parse type: ${type}`)
     }

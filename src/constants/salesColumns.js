@@ -143,6 +143,7 @@ export const SUMMARY_COLUMNS_ESSER = {
     { key: 'salesRoas', label: 'ROAS(전체)' },
   ],
   channel: [
+    { key: 'dataSourceLabel', label: '출처' },
     { key: 'channel', label: '판매처' },
     { key: 'revenue', label: '매출' },
     { key: 'totalCost', label: '원가' },
@@ -151,6 +152,8 @@ export const SUMMARY_COLUMNS_ESSER = {
     { key: 'quantity', label: '판매수량' },
   ],
   product: [
+    { key: 'dataSourceLabel', label: '출처' },
+    { key: 'platform', label: '플랫폼' },
     { key: 'productName', label: '상품명' },
     { key: 'revenue', label: '매출' },
     { key: 'totalCost', label: '원가' },
@@ -159,6 +162,8 @@ export const SUMMARY_COLUMNS_ESSER = {
     { key: 'marginRate', label: '순이익률' },
   ],
   productOption: [
+    { key: 'dataSourceLabel', label: '출처' },
+    { key: 'platform', label: '플랫폼' },
     { key: 'productName', label: '상품명' },
     { key: 'option', label: '옵션' },
     { key: 'revenue', label: '매출' },
@@ -169,8 +174,12 @@ export const SUMMARY_COLUMNS_ESSER = {
 }
 
 export function resolveSummaryColumns(tab, records = []) {
-  if (records.some(isEsserDetailRow) && SUMMARY_COLUMNS_ESSER[tab]) {
-    return SUMMARY_COLUMNS_ESSER[tab]
+  const esserCols = SUMMARY_COLUMNS_ESSER[tab]
+  if (esserCols && (records.some(isEsserDetailRow) || records.some((r) => r.dataSourceLabel))) {
+    return esserCols
+  }
+  if (esserCols && records.some((r) => r.revenue != null || r.sales != null)) {
+    return esserCols
   }
   return RECORD_TYPES[tab]?.columns || []
 }
@@ -223,6 +232,15 @@ export const RECORD_TYPES = {
 
 /** 판매·집계 탭 (반품 제외) */
 export const RECORD_TAB_KEYS_MAIN = Object.keys(RECORD_TYPES).filter((k) => k !== 'returns')
+
+export const SERVER_PAGED_TABLE_TABS = new Set([
+  'detail',
+  'returns',
+  'daily',
+  'channel',
+  'product',
+  'productOption',
+])
 
 /** 맨 아래 반품 전용 탭 */
 export const RECORD_TAB_KEY_RETURNS = 'returns'

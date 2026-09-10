@@ -2,7 +2,9 @@
 
 > **목적:** “기능을 얹고 얹은” 현재 구조를 정리하고, **기능은 유지**한 채 구조를 갈아엎을 때의 원칙·범위·순서를 고정한다.  
 > **이 문서는 가이드다. 작성만으로 코드가 바뀌지 않는다.**  
-> 기준일: 2026-08 · 스택: Vue 3 + Express/PG + NAS Docker
+> 기준일: 2026-08 · 스택: Vue 3 + Express/PG + NAS Docker  
+> **기능 동결:** R1(서버 by-segment) 골든 통과 전까지 신규 비즈니스 기능 추가 금지. 버그픽스·숫자 회귀만 허용.  
+> 골든 체크리스트: [golden/checklist.md](./golden/checklist.md)
 
 관련 문서:
 
@@ -10,6 +12,7 @@
 - [performance-remediation-guide.md](./performance-remediation-guide.md) — 성능 Phase 로드맵
 - [excel-export-column-dictionary.md](./excel-export-column-dictionary.md) — 엑셀 컬럼 계약
 - [combined-comments-concurrency-guide.md](./combined-comments-concurrency-guide.md) — 코멘트 동시 저장
+- [golden/checklist.md](./golden/checklist.md) — G1–G8 골든 숫자
 
 ---
 
@@ -140,7 +143,7 @@ Vue는 **표시·입력·업로드 트리거**만. 재집계 금지.
 
 `src/config/*` + `combinedKpiSegments.js`를 계약으로 본다.
 
-- 통합 세그먼트: BH(판매자+그로스/로켓/스스), SBN(판매자/스스/자사몰), 파워, 동적 폐쇄몰 행
+- 통합 세그먼트: BH(판매자+그로스/로켓/스스), SBN(판매자+그로스/스스/자사몰), 파워, 동적 폐쇄몰 행
 - 수동광고 채널: Meta / GFA / AD / 구글 트래픽
 - 폐쇄몰: 에쎄르·베스트하임, `특판 폐쇄몰`
 - 파워프라이스 수수료 **7%**, 자사몰 카드 **3.3%**
@@ -205,10 +208,10 @@ Vue는 **표시·입력·업로드 트리거**만. 재집계 금지.
 
 ### Phase R0 — 동결·측정 (1~2일)
 
-- [ ] 골든 케이스 G1~G8 스냅샷 확보 (화면 + 엑셀)
-- [ ] 기능 동결 선언
-- [ ] `current-structure.md`를 deprecated 표시 또는 PG 기준으로 1페이지 요약 교체
-- [ ] 플래그 실측: `SERVER_KPI_ONLY` / `LAZY_DETAIL` / records `full|lean` 실제값 표로 고정
+- [x] 골든 케이스 G1~G8 체크리스트 템플릿 ([golden/checklist.md](./golden/checklist.md))
+- [x] 기능 동결 선언
+- [ ] 골든 스냅샷 실측 기입 (NAS 기간·Before/After)
+- [x] 플래그 실측: `.env.production.example` 기준 표 고정
 
 **완료 기준:** “다시 만들면 이 숫자와 같아야 함” 체크리스트가 존재함.
 
@@ -216,11 +219,11 @@ Vue는 **표시·입력·업로드 트리거**만. 재집계 금지.
 
 목표: **통합 포함 화면 KPI·세그먼트 = 서버만.**
 
-- [ ] 서버 `by-segment` (또는 by-platform 확장)로 통합 브랜드 행 제공
-- [ ] `SalesPeriodDashboard`에서 `buildCombinedKpiSplitRows` 제거
-- [ ] `SalesDataView`의 `syncDashboardKpiSnapshot` / 세그먼트용 detail 의존 제거
-- [ ] 합계 행 = 서버 세그먼트 합 또는 서버 summary **한 곳만** (패치 혼용 금지)
-- [ ] G6 골든 숫자 일치
+- [x] 서버 `GET /kpi/by-segment` — 브랜드·폐쇄몰·수동광고·합계
+- [x] 통합 탭: `adaptServerSegmentKpiRows` 사용 (`buildCombined`는 폴백만)
+- [x] 통합 detail prefetch 제거 (lazy + 서버 세그먼트)
+- [x] 합계 행 = 서버 세그먼트 totalRow (summary 패치 혼용 금지)
+- [ ] G6 골든 숫자 일치 (수동 검증)
 
 **완료 기준:** 통합 탭 기간 변경 시 detail 전량 없이도 표가 채워지고, 행 합 = 합계.
 
@@ -294,12 +297,38 @@ Vue는 **표시·입력·업로드 트리거**만. 재집계 금지.
 
 ---
 
-## 8. 바로 다음 액션 (추천)
+## 8. 실행 상태 (R0 → R1)
 
-코드 작성 전에 이것만 하면 된다.
+| 단계 | 상태 | 산출물 |
+|------|------|--------|
+| R0 골든 체크리스트·플래그·동결 | **완료** | [golden/checklist.md](./golden/checklist.md) |
+| R1 `GET /kpi/by-segment` | **완료** (G6 수동 검증 남음) | 서버 세그먼트 + 통합 UI 서버 단일 소스 |
+| R2 records scope+기간 | 대기 | — |
+| R3 export 서버 전용 | 대기 | — |
 
-1. **골든 스냅샷 하루** — 실제 쓰는 기간 1개로 G1·G6·G7 엑셀/화면 저장  
-2. **R1 설계 확정** — `/kpi/by-segment` 응답 JSON 스케치 (세그먼트 label·profit·ad·rowCount)  
-3. **기능 동결** — 새 칸/새 탭 요청은 백로그에만 쌓기  
+### 프로덕션 플래그 (`.env.production.example`)
 
-원하시면 다음 단계로 **R1 API 응답 스키마 초안**과 **골든 체크리스트 템플릿**을 이 문서에 이어서 구체화하면 됩니다.
+| Flag | 값 |
+|------|-----|
+| `VITE_KPI_SOURCE` | `server` |
+| `VITE_SERVER_KPI_ONLY` | `true` |
+| `VITE_LAZY_DETAIL_LOAD` | `true` |
+| `VITE_EXPORT_API_MODE` | `pg` |
+
+### R1 수동 검증
+
+1. 통합 탭 → DevTools Network에 `/kpi/by-segment`  
+2. detail 전량 prefetch 없음  
+3. [G6](./golden/checklist.md) 세그먼트 합 = 합계
+
+### 탭 전환 (SWR + idle prefetch)
+
+1. 대시보드 진입 후 2~3초 대기 → 다른 채널 탭 클릭 → KPI가 **즉시** 표시 (Network에 해당 scope가 이미 완료됐거나 캐시)
+2. 탭 왕복 → `loading` 전체 차단 없음, summary/by-segment는 TTL(45s) 내 재요청 생략
+3. 통합 포함 prefetch 대상 — G6 회귀 없음
+
+### 통합 매출·원가·마진 SoT
+
+- 단일 기준: `buildCombinedKpiSplitRows` **합계** 행 (화면 KPI·손익요약·엑셀)
+- 로컬 검증: `npm run verify:combined-kpi`
+- 엑셀 양식 `v32` 이상인지 확인 (①요약리포트 헤더)

@@ -51,8 +51,8 @@ export const CLOSED_MALL_REQUIRED_HEADERS = [
   'a원가',
 ]
 
-/** 있으면 행에 반영 (없으면 빈값) */
-export const CLOSED_MALL_OPTIONAL_HEADERS = ['a옵션', 'a브랜드']
+/** 있으면 행에 반영 (없으면 빈값) — `마진`은 `a마진`과 동일 취급 */
+export const CLOSED_MALL_OPTIONAL_HEADERS = ['a옵션', 'a브랜드', '정산가', 'a마진', '마진']
 
 /** 미리보기·안내용 전체 헤더 */
 export const CLOSED_MALL_ALL_HEADERS = [
@@ -102,12 +102,18 @@ export function formatClosedMallKpiLabel(brandLabel, seller) {
   return `${brand}(${name})`
 }
 
-/** 레거시 공백 포맷 `베스트하임 (x)` 및 신규 `브랜드(x)` */
+/** 통합 KPI 고정 세그먼트 — 특판 판매처 라벨과 구분 */
+const COMBINED_FIXED_KPI_LABEL_RE =
+  /^(베스트하임|사본느리|에쎄르)\((로켓|판매자|그로스|판매자\+그로스|스스|자사몰)\)$/
+
+/** 레거시 공백 포맷 `베스트하임 (x)` 및 신규 `브랜드(x)` — 특판 판매처만 */
 export function isClosedMallKpiLabel(label) {
   const s = String(label ?? '').trim()
   if (s === '특판 폐쇄몰' || s === '베스트하임(특판 폐쇄몰)') return true
   if (/^베스트하임 \(.+\)$/.test(s)) return true
-  return /^(에쎄르|베스트하임)\(.+\)$/.test(s)
+  if (COMBINED_FIXED_KPI_LABEL_RE.test(s)) return false
+  if (s === '파워프라이스') return false
+  return /^(에쎄르|베스트하임|사본느리)\(.+\)$/.test(s)
 }
 
 /** 라벨에서 판매처명 추출 */
@@ -115,15 +121,16 @@ export function closedMallSellerFromKpiLabel(label) {
   const s = String(label ?? '').trim()
   const spaced = s.match(/^베스트하임 \((.+)\)$/)
   if (spaced) return spaced[1].trim()
-  const m = s.match(/^(?:에쎄르|베스트하임)\((.+)\)$/)
+  const m = s.match(/^(?:에쎄르|베스트하임|사본느리)\((.+)\)$/)
   return m ? m[1].trim() : ''
 }
 
-/** 라벨에서 브랜드(에쎄르|베스트하임) 추출 */
+/** 라벨에서 브랜드(에쎄르|베스트하임|사본느리) 추출 */
 export function closedMallBrandFromKpiLabel(label) {
   const s = String(label ?? '').trim()
   if (/^베스트하임 \(.+\)$/.test(s) || /^베스트하임\(.+\)$/.test(s)) return '베스트하임'
   if (/^에쎄르\(.+\)$/.test(s)) return '에쎄르'
+  if (/^사본느리\(.+\)$/.test(s)) return '사본느리'
   return ''
 }
 
@@ -198,4 +205,85 @@ export function closedMallDuplicateFingerprint(row) {
 
 export function isOtherSellersScope(scope) {
   return scope === OTHER_SELLERS_SCOPE
+}
+
+/** a브랜드(상품 브랜드) — 특판 row.brand / productBrand / data JSON */
+export function resolveClosedMallProductBrand(row) {
+  if (!row) return ''
+  const data = row.data && typeof row.data === 'object' ? row.data : {}
+  return String(
+    row.productBrand ||
+      row.brand ||
+      data.productBrand ||
+      data.brand ||
+      '',
+  ).trim()
+}
+
+/** a브랜드에 「사본느리」 부분 포함 (예: 라사본느리드니옹) */
+export function productBrandIncludesSabonneurri(raw) {
+  return /사본느리/i.test(String(raw ?? '').trim())
+}
+
+/** a브랜드에 「베스트하임」 부분 포함 */
+export function productBrandIncludesBestheim(raw) {
+  return /베스트하임/i.test(String(raw ?? '').trim())
+}
+
+/**
+ * KPI·표시용 브랜드 라벨 — a브랜드 우선, 에쎄르 업로드는 사본느리
+ * @returns {'에쎄르'|'베스트하임'|'사본느리'|''}
+ */
+export function resolveClosedMallKpiBrandLabel(row) {
+  if (!row) return ''
+  const productBrand = resolveClosedMallProductBrand(row)
+  if (productBrandIncludesSabonneurri(productBrand)) return '사본느리'
+  if (/에쎄르/i.test(productBrand)) return '사본느리'
+  if (productBrandIncludesBestheim(productBrand)) return '베스트하임'
+  const uploadBrand = resolveClosedMallBrand(row)
+  if (uploadBrand === '에쎄르') return '사본느리'
+  if (uploadBrand === '베스트하임') return '베스트하임'
+  return uploadBrand || '베스트하임'
+}
+
+/**
+ * 베스트하임 일별·월별 대시보드 특판 포함 여부
+ * - a브랜드에 「베스트하임」 포함 → 포함
+ * - a브랜드 비어 있고 베스트하임 탭 업로드 → 포함
+ * - a브랜드에 「사본느리」 포함 → 제외
+ */
+export function closedMallBelongsToBestheimPlatform(row) {
+  if (!isClosedMallRecord(row)) return false
+  const productBrand = resolveClosedMallProductBrand(row)
+  if (productBrandIncludesBestheim(productBrand)) return true
+  if (productBrandIncludesSabonneurri(productBrand) || /에쎄르/i.test(productBrand)) return false
+  const uploadBrand = resolveClosedMallBrand(row)
+  if (uploadBrand === '베스트하임' && !productBrand) return true
+  return false
+}
+
+/**
+ * 사본느리 일별·월별 대시보드 특판 포함 여부
+ * - a브랜드에 「사본느리」 부분 포함 → 포함 (예: 라사본느리드니옹)
+ * - a브랜드 비어 있고 에쎄르 탭 업로드 → 포함
+ * - a브랜드에 「베스트하임」만 포함 → 제외
+ */
+export function closedMallBelongsToSabonneurriPlatform(row) {
+  if (!isClosedMallRecord(row)) return false
+  const productBrand = resolveClosedMallProductBrand(row)
+  if (productBrandIncludesSabonneurri(productBrand)) return true
+  if (productBrandIncludesBestheim(productBrand)) return false
+  const uploadBrand = resolveClosedMallBrand(row)
+  if (uploadBrand === '에쎄르' && !productBrand) return true
+  return false
+}
+
+/** @param {object[]} records */
+export function filterClosedMallForBestheimPlatform(records) {
+  return (records || []).filter(closedMallBelongsToBestheimPlatform)
+}
+
+/** @param {object[]} records */
+export function filterClosedMallForSabonneurriPlatform(records) {
+  return (records || []).filter(closedMallBelongsToSabonneurriPlatform)
 }

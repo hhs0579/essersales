@@ -63,9 +63,24 @@ export function createTtlCache(defaultTtlMs = 45000) {
     }
   }
 
+  /** 결과만 삭제 — 진행 중 fetch(single-flight)는 유지 */
+  function invalidateResult(matcher) {
+    if (matcher == null) {
+      results.clear()
+      return
+    }
+    if (typeof matcher === 'string') {
+      results.delete(matcher)
+      return
+    }
+    for (const key of [...results.keys()]) {
+      if (matcher(key)) results.delete(key)
+    }
+  }
+
   function clearInflight() {
     inflight.clear()
   }
 
-  return { get, getOrLoad, invalidate, clearInflight }
+  return { get, getOrLoad, invalidate, invalidateResult, clearInflight }
 }

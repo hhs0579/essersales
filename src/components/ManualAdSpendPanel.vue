@@ -11,7 +11,11 @@ import {
 import { formatManualAdAmount, parseAmount } from '../utils/parseAmount.js'
 import { formatNaverAdImportMessage } from '../utils/naverAdCenterParser.js'
 import { MANUAL_AD_SOURCE_OPTIONS, normalizeManualAdSource } from '../config/manualAdSpend.js'
-import { maxReportDateYmd } from '../utils/reportDateRange.js'
+import {
+  resolveManualEntryDefaultDate,
+  resolveManualEntryDateSuggest,
+  applyManualEntryDefaultToEmptyRows,
+} from '../utils/manualEntryDate.js'
 import YmdDateFields from './YmdDateFields.vue'
 import YmMonthFields from './YmMonthFields.vue'
 
@@ -37,54 +41,21 @@ const isCompanyBScope = computed(
   () => props.scope === 'company_b' || props.scope === 'company_b_monthly',
 )
 
-/** 조회 조건이 하루(시작=종료)일 때 그 날짜 (daily) */
-const singleFilterDate = computed(() => {
-  const { dateFrom, dateTo } = props.filterCtx
-  if (dateFrom && dateTo && dateFrom === dateTo) return dateFrom
-  return ''
-})
-
-/** 조회 조건이 같은 달이면 그 달의 시작일(YYYY-MM-01) (monthly) */
-const singleFilterMonthStart = computed(() => {
-  const { year, month, dateFrom, dateTo } = props.filterCtx
-  if (year && month) {
-    return `${year}-${String(month).padStart(2, '0')}-01`
-  }
-  if (!dateFrom || !dateTo) return ''
-  if (dateFrom.slice(0, 7) !== dateTo.slice(0, 7)) return ''
-  return `${dateFrom.slice(0, 7)}-01`
-})
-
-const singleAutoDate = computed(() =>
-  periodMode.value === 'monthly' ? singleFilterMonthStart.value : singleFilterDate.value,
+const entryDateSuggest = computed(() =>
+  resolveManualEntryDateSuggest(props.filterCtx, periodMode.value),
 )
 
-/**
- * 새 행에만 넣는 명시적 기본 일자.
- * 기간 필터(1~7일)일 때 dateFrom(1일)을 쓰면 안 됨 — 종료일(최근일) 또는 단일일만.
- */
-const newEntryDefaultDate = computed(() => {
-  if (singleAutoDate.value) return singleAutoDate.value
-  const { dateFrom, dateTo, year, month } = props.filterCtx
-  if (periodMode.value === 'monthly') {
-    if (year && month) return `${year}-${String(month).padStart(2, '0')}-01`
-    if (dateFrom && dateTo && dateFrom.slice(0, 7) === dateTo.slice(0, 7)) {
-      return `${dateFrom.slice(0, 7)}-01`
-    }
-    return ''
-  }
-  // 일별 기간: 시작일이 아니라 종료일을 기본값으로 (최근 일자 기입 UX)
-  if (dateTo) return dateTo
-  if (dateFrom) return dateFrom
-  return maxReportDateYmd()
-})
+const newEntryDefaultDate = computed(() =>
+  resolveManualEntryDefaultDate(props.filterCtx, periodMode.value),
+)
 
-watch(singleAutoDate, (date) => {
-  if (!date) return
-  for (const row of entries.value) {
-    if (!row.date) row.date = date
-  }
-})
+watch(
+  () => newEntryDefaultDate.value,
+  (date) => {
+    if (!date) return
+    applyManualEntryDefaultToEmptyRows(entries.value, props.filterCtx, periodMode.value)
+  },
+)
 
 function onAddEntry() {
   addEntry(newEntryDefaultDate.value || '', newEntrySource.value)
@@ -199,8 +170,10 @@ async function onNaverAdFileChange(e) {
       <strong v-else>일별</strong>
       리포트에서 <strong>광고비용</strong>·<strong>전환매출액</strong>만 입력하면
       KPI·그래프·엑셀에 반영됩니다. (노출·클릭 등은 불필요)
-      <span v-if="singleAutoDate" class="filter-date-hint">
-        조회 기간 자동 적용 — <strong v-if="periodMode === 'monthly'">{{ singleAutoDate.slice(0, 7) }}</strong><strong v-else>{{ singleAutoDate }}</strong>
+      <span v-if="entryDateSuggest" class="filter-date-hint">
+        조회 기간 자동 적용 —
+        <strong v-if="periodMode === 'monthly'">{{ entryDateSuggest.slice(0, 7) }}</strong>
+        <strong v-else>{{ entryDateSuggest }}</strong>
       </span>
       <span v-else-if="hasDateFilter" class="filter-date-hint">
         조회 기간 —
@@ -213,10 +186,11 @@ async function onNaverAdFileChange(e) {
         <strong v-else-if="filterCtx.dateFrom">{{ filterCtx.dateFrom }} ~</strong>
         <strong v-else-if="filterCtx.dateTo">~ {{ filterCtx.dateTo }}</strong>
         에 맞는 행만 표시합니다.
-        <template v-if="periodMode === 'monthly'"> 월은 <strong>년 · 월</strong> 드롭다운으로 지정하세요.</template>
+        <template v-if="periodMode === 'monthly'">
+          월은 조회 기간에 맞게 <strong>자동 입력</strong>됩니다. 필요 시 드롭다운으로 변경하세요.
+        </template>
         <template v-else>
-          일자는 <strong>년 · 월 · 일</strong>로 지정하세요. 행 추가 시 기본값은 조회
-          <strong>종료일</strong>입니다 (시작일로 바뀌지 않음).
+          일자는 조회 기간에 맞게 <strong>자동 입력</strong>됩니다 (기간 조회 시 <strong>종료일</strong>).
         </template>
       </span>
       <span v-if="hiddenEntryCount > 0" class="filter-date-hint muted-hint">
@@ -283,8 +257,13 @@ async function onNaverAdFileChange(e) {
                 <YmMonthFields
                   v-if="periodMode === 'monthly'"
                   v-model="row.date"
+                  :suggest-date="entryDateSuggest"
                 />
-                <YmdDateFields v-else v-model="row.date" />
+                <YmdDateFields
+                  v-else
+                  v-model="row.date"
+                  :suggest-date="entryDateSuggest"
+                />
               </td>
               <td class="col-kind">
                 <select

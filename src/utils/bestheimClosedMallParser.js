@@ -49,6 +49,64 @@ function parseOptionalAmount(val) {
   return parseAmount(val)
 }
 
+/** a마진·정산가 — 0·음수 허용 */
+function parseOptionalSignedNumber(val) {
+  if (val == null || String(val).trim() === '') return { ok: false, value: null }
+  const raw = String(val)
+    .trim()
+    .replace(/,/g, '')
+  if (!raw || raw === '-' || raw === '–') return { ok: false, value: null }
+  const n = parseAmount(val)
+  if (!Number.isFinite(n)) return { ok: false, value: null }
+  return { ok: true, value: n }
+}
+
+/**
+ * 마진·원가 — 엑셀 양식별 분기
+ * 1) a마진 열 → 그 값 사용, a원가 = 행 합계 원가
+ * 2) 정산가 열 → 정산가 − 배송비 − a원가(행 합계), a원가×수량 안 함
+ * 3) 레거시(GSSHOP 등) → a원가 = 개당, 마진 = 결제가 − 배송 − 수수료 − 원가×수량
+ */
+function resolveClosedMallMargin({
+  payment,
+  qty,
+  shippingFee,
+  commission,
+  costValue,
+  settlementRaw,
+  marginRaw,
+}) {
+  const marginParsed = parseOptionalSignedNumber(marginRaw)
+  if (marginParsed.ok) {
+    const settlementParsed = parseOptionalSignedNumber(settlementRaw)
+    const settlementPrice = settlementParsed.ok ? settlementParsed.value : payment - commission
+    return {
+      netProfit: Math.round(marginParsed.value),
+      totalCost: Math.round(costValue),
+      unitCost: qty > 0 ? costValue / qty : costValue,
+      settlementPrice: Math.round(settlementPrice),
+    }
+  }
+
+  const settlementParsed = parseOptionalSignedNumber(settlementRaw)
+  if (settlementParsed.ok) {
+    return {
+      netProfit: Math.round(settlementParsed.value - shippingFee - costValue),
+      totalCost: Math.round(costValue),
+      unitCost: qty > 0 ? costValue / qty : costValue,
+      settlementPrice: Math.round(settlementParsed.value),
+    }
+  }
+
+  const totalCost = costValue * qty
+  return {
+    netProfit: Math.round(payment - shippingFee - commission - totalCost),
+    totalCost: Math.round(totalCost),
+    unitCost: costValue,
+    settlementPrice: Math.round(payment - commission),
+  }
+}
+
 /**
  * a수수료 — 금액 또는 비율
  * - `25%` / `25.0%` → 결제가 × 25%
@@ -125,6 +183,13 @@ function cellAt(row, col, name) {
   return row[idx]
 }
 
+/** a마진 · 마진 — 둘 중 있는 쪽 */
+function marginCellAt(row, col) {
+  const v = cellAt(row, col, 'a마진')
+  if (v !== '' && v != null) return v
+  return cellAt(row, col, '마진')
+}
+
 /**
  * @param {object} p
  * @param {Set<string>} [_existingFingerprints] 미사용(중복 제외 안 함)
@@ -141,6 +206,8 @@ export function parseClosedMallDataRow(p, _existingFingerprints = new Set()) {
   const shippingRaw = p.shippingRaw
   const feeRaw = p.feeRaw
   const costRaw = p.costRaw
+  const settlementRaw = p.settlementRaw
+  const marginRaw = p.marginRaw
 
   const option = String(optionRaw ?? '').trim()
   const productBrand = String(productBrandRaw ?? '').trim()
@@ -215,9 +282,16 @@ export function parseClosedMallDataRow(p, _existingFingerprints = new Set()) {
 
   const qty = qtyParsed.value
   const payment = payParsed.value
-  const unitCost = costParsed.value
-  const totalCost = unitCost * qty
-  const netProfit = payment - shippingFee - commission - totalCost
+  const costValue = costParsed.value
+  const { netProfit, totalCost, unitCost, settlementPrice } = resolveClosedMallMargin({
+    payment,
+    qty,
+    shippingFee,
+    commission,
+    costValue,
+    settlementRaw,
+    marginRaw,
+  })
 
   const fp = closedMallDuplicateFingerprint({
     dateYmd,
@@ -246,6 +320,7 @@ export function parseClosedMallDataRow(p, _existingFingerprints = new Set()) {
     unitCost,
     totalCost,
     netProfit,
+    settlementPrice,
     fingerprint: fp,
   }
 }
@@ -267,6 +342,8 @@ export function closedMallRowToDetail(parsedRow, fileName = '', brandOrKey = 'be
     date: parsedRow.dateYmd,
     order_date: parsedRow.dateYmd,
     saleDate: parsedRow.dateYmd,
+    periodFrom: parsedRow.dateYmd,
+    periodTo: parsedRow.dateYmd,
     storeName: parsedRow.seller,
     store_name: parsedRow.seller,
     closedMallSeller: parsedRow.seller,
@@ -284,6 +361,7 @@ export function closedMallRowToDetail(parsedRow, fileName = '', brandOrKey = 'be
     shippingFee: parsedRow.shippingFee,
     channelFee: parsedRow.commission,
     commission: parsedRow.commission,
+    settlementPrice: parsedRow.settlementPrice,
     unitCost: parsedRow.unitCost,
     totalCost: parsedRow.totalCost,
     netProfit: parsedRow.netProfit,
@@ -375,6 +453,8 @@ export async function readClosedMallBuffer(buffer, fileName, opts = {}) {
       shippingRaw: cellAt(row, col, 'a배송비'),
       feeRaw: cellAt(row, col, 'a수수료'),
       costRaw: cellAt(row, col, 'a원가'),
+      settlementRaw: cellAt(row, col, '정산가'),
+      marginRaw: marginCellAt(row, col),
     })
 
     if (parsed.status === 'skip_empty') continue

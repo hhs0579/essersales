@@ -33,7 +33,6 @@ const KPI_QS = `scope=${KPI_SCOPE}&upload_kind=platform_daily`
 const EXPORT_SHEETS = [
   '①요약리포트',
   '②전일대비',
-  '②판매방식별',
   '③일별',
   '④주별',
   '⑤월별',

@@ -14,8 +14,9 @@ let seq = 0
  * @param {'platform_daily' | 'platform_monthly' | 'platform_period'} type
  * @param {File} file
  * @param {string} platform
+ * @param {{ allowZeroSalesProducts?: boolean }} [options]
  */
-async function parseInWorker(type, file, platform) {
+async function parseInWorker(type, file, platform, options = {}) {
   const id = ++seq
   const worker = new ExcelParseWorker()
   const buffer = await file.arrayBuffer()
@@ -38,27 +39,27 @@ async function parseInWorker(type, file, platform) {
       worker.terminate()
       reject(err?.message ? new Error(err.message) : err)
     }
-    worker.postMessage({ id, type, buffer, fileName: file.name, platform }, [buffer])
+    worker.postMessage({ id, type, buffer, fileName: file.name, platform, options }, [buffer])
   })
 }
 
-async function withFallback(type, file, platform, mainThreadFn) {
+async function withFallback(type, file, platform, mainThreadFn, options = {}) {
   try {
-    return await parseInWorker(type, file, platform)
+    return await parseInWorker(type, file, platform, options)
   } catch (workerErr) {
     console.warn('엑셀 Worker 파싱 실패, 메인 스레드 fallback:', workerErr?.message || workerErr)
-    return mainThreadFn(file, platform)
+    return mainThreadFn(file, platform, options)
   }
 }
 
-export function parsePlatformDailyInWorker(file, platform) {
-  return withFallback('platform_daily', file, platform, readPlatformDailyFile)
+export function parsePlatformDailyInWorker(file, platform, options = {}) {
+  return withFallback('platform_daily', file, platform, readPlatformDailyFile, options)
 }
 
-export function parsePlatformMonthlyInWorker(file, platform) {
-  return withFallback('platform_monthly', file, platform, readPlatformMonthlyFile)
+export function parsePlatformMonthlyInWorker(file, platform, options = {}) {
+  return withFallback('platform_monthly', file, platform, readPlatformMonthlyFile, options)
 }
 
-export function parsePlatformPeriodInWorker(file, platform) {
-  return withFallback('platform_period', file, platform, readPlatformPeriodFile)
+export function parsePlatformPeriodInWorker(file, platform, options = {}) {
+  return withFallback('platform_period', file, platform, readPlatformPeriodFile, options)
 }

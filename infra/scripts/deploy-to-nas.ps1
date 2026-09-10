@@ -14,6 +14,39 @@ param(
   [switch]$SkipDocker
 )
 
+function Resolve-JsRuntime {
+  $bun = Get-Command bun -ErrorAction SilentlyContinue
+  if ($bun) {
+    return @{ Name = "bun"; Exe = $bun.Source }
+  }
+  $bunHome = Join-Path $env:USERPROFILE ".bun\bin\bun.exe"
+  if (Test-Path -LiteralPath $bunHome) {
+    return @{ Name = "bun"; Exe = $bunHome }
+  }
+  $npm = Get-Command npm -ErrorAction SilentlyContinue
+  if ($npm) {
+    return @{ Name = "npm"; Exe = $npm.Source }
+  }
+  return $null
+}
+
+function Invoke-ProductionBuild {
+  param([string]$Root)
+  $rt = Resolve-JsRuntime
+  if (-not $rt) {
+    throw "bun/npm not found. This PC uses bun — install bun, or open a terminal where `bun -v` works, then rerun."
+  }
+  Write-Host ("  using " + $rt.Name + " (" + $rt.Exe + ")") -ForegroundColor DarkGray
+  Push-Location $Root
+  try {
+    & $rt.Exe run build:production
+    if ($LASTEXITCODE -ne 0) { throw "build:production failed (exit $LASTEXITCODE)" }
+  }
+  finally {
+    Pop-Location
+  }
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -34,6 +67,9 @@ if (-not $LocalRoot) {
   $LocalRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
 
+if (-not $NasUser) {
+  $NasUser = [string]$env:NAS_USER
+}
 if (-not $NasUser) {
   Write-Host "Use DSM login ID from Control Panel > User (often English like admin)." -ForegroundColor Yellow
   Write-Host "Korean name like display name usually FAILS for SMB." -ForegroundColor Yellow
@@ -64,14 +100,7 @@ Write-Host ""
 
 if (-not $SkipBuild) {
   Write-Host "[1/3] Production build..." -ForegroundColor Yellow
-  Push-Location $LocalRoot
-  try {
-    npm run build:production
-    if ($LASTEXITCODE -ne 0) { throw "build:production failed (exit $LASTEXITCODE)" }
-  }
-  finally {
-    Pop-Location
-  }
+  Invoke-ProductionBuild -Root $LocalRoot
   Write-Host "Build OK" -ForegroundColor Green
 }
 else {
@@ -79,17 +108,20 @@ else {
 }
 
 Write-Host "[2/3] NAS login ($smbUser)..." -ForegroundColor Yellow
-Write-Host "  Enter DSM password then Enter (no echo while typing)" -ForegroundColor DarkGray
-$securePass = Read-Host "NAS DSM password" -AsSecureString
-if (-not $securePass -or $securePass.Length -eq 0) {
-  throw "Password is empty"
-}
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass)
-try {
-  $plainPass = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-}
-finally {
-  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) | Out-Null
+$plainPass = [string]$env:NAS_PASSWORD
+if (-not $plainPass) {
+  Write-Host "  Enter DSM password then Enter (no echo while typing)" -ForegroundColor DarkGray
+  $securePass = Read-Host "NAS DSM password" -AsSecureString
+  if (-not $securePass -or $securePass.Length -eq 0) {
+    throw "Password is empty"
+  }
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass)
+  try {
+    $plainPass = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  }
+  finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) | Out-Null
+  }
 }
 
 Write-Host "[2/3] Map drive and copy..." -ForegroundColor Yellow
@@ -110,7 +142,6 @@ $netArgs = $driveName + ': "' + $NasUnc + '" /user:' + $smbUser + ' "' + $plainP
 $netOut = cmd.exe /c ("net use " + $netArgs) 2>&1
 $netCode = $LASTEXITCODE
 $ErrorActionPreference = $prevEa
-$plainPass = $null
 
 if ($netCode -ne 0) {
   Write-Host ($netOut | Out-String) -ForegroundColor Red
@@ -132,22 +163,39 @@ try {
     @{ Src = "src\utils"; Dst = "src\utils" },
     @{ Src = "src\config"; Dst = "src\config" },
     @{ Src = "src\constants"; Dst = "src\constants" },
+    @{ Src = "src\services\adapters"; Dst = "src\services\adapters" },
     @{ Src = "backend"; Dst = "backend" },
-    @{ Src = "infra\db"; Dst = "infra\db" }
+    @{ Src = "infra\db"; Dst = "infra\db" },
+    @{ Src = "docker-compose.nas.yml"; Dst = "docker-compose.nas.yml" }
   )
 
   foreach ($item in $copyItems) {
     $src = Join-Path $LocalRoot $item.Src
-    $dst = Join-Path $NasRoot $item.Dst
     if (-not (Test-Path -LiteralPath $src)) {
       throw ("Missing local path: " + $src)
     }
     Write-Host ("  -> " + $item.Dst)
+
+    if (Test-Path -LiteralPath $src -PathType Leaf) {
+      $dstFile = Join-Path $NasRoot $item.Dst
+      $dstParent = Split-Path -Parent $dstFile
+      if ($dstParent -and -not (Test-Path -LiteralPath $dstParent)) {
+        New-Item -ItemType Directory -Path $dstParent -Force | Out-Null
+      }
+      Copy-Item -LiteralPath $src -Destination $dstFile -Force
+      continue
+    }
+
+    $dst = Join-Path $NasRoot $item.Dst
     if (-not (Test-Path -LiteralPath $dst)) {
       New-Item -ItemType Directory -Path $dst -Force | Out-Null
     }
     $roboDst = Join-Path $NasUnc $item.Dst
-    robocopy $src $roboDst /E /MT:8 /R:2 /W:2 /NFL /NDL /NJH /NJS /NP /DCOPY:DAT | Out-Null
+    $roboArgs = @($src, $roboDst, '/E', '/MT:8', '/R:2', '/W:2', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/DCOPY:DAT')
+    if ($item.Src -eq 'backend') {
+      $roboArgs += @('/XD', 'node_modules')
+    }
+    & robocopy @roboArgs | Out-Null
     $rc = $LASTEXITCODE
     if ($rc -ge 8) {
       throw ("robocopy failed for " + $item.Dst + " (exit " + $rc + ")")
@@ -175,11 +223,37 @@ if ($SkipDocker) {
 }
 
 Write-Host "[3/3] NAS Docker restart (SSH)..." -ForegroundColor Yellow
+Write-Host "  'Could not chdir to home directory' on Synology SSH is harmless." -ForegroundColor DarkGray
+Write-Host "  api/proxy restart only (source mounted) - usually under 1 minute." -ForegroundColor DarkGray
 $sshTarget = $sshUser + "@" + $NasHost
-$remoteCmd = "sudo -i bash -c 'export PATH=`$PATH:/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin; cd /volume1/docker/essersales && docker stop essersales-proxy-1 essersales-api-1 essersales-db-1 2>/dev/null; docker rm essersales-proxy-1 essersales-api-1 essersales-db-1 2>/dev/null; docker compose -f docker-compose.nas.yml up -d --build; docker compose -f docker-compose.nas.yml ps'"
+$remoteInner = "export PATH=`$PATH:/usr/local/bin:/usr/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin; cd /volume1/docker/essersales && docker compose -f docker-compose.nas.yml up -d --force-recreate api proxy && docker compose -f docker-compose.nas.yml ps"
+$remoteCmd = "printf '%s\n' " + "'" + ($plainPass -replace "'", "'\''") + "'" + " | sudo -S -p '' bash -lc " + "'" + $remoteInner.Replace("'", "'\''") + "'"
 
-ssh -t -o StrictHostKeyChecking=accept-new $sshTarget $remoteCmd
-if ($LASTEXITCODE -ne 0) {
+$env:NAS_SSH_PASS = $plainPass
+$askCmd = Join-Path $env:TEMP "essersales-ssh-askpass.cmd"
+$bunAsk = Join-Path $env:USERPROFILE ".bun\bin\bun.exe"
+if (-not (Test-Path -LiteralPath $bunAsk)) {
+  $bunAsk = "bun"
+}
+@(
+  "@echo off"
+  ("`"" + $bunAsk + "`" -e `"process.stdout.write(process.env.NAS_SSH_PASS||'')`"")
+) | Set-Content -LiteralPath $askCmd -Encoding ASCII
+$env:SSH_ASKPASS = $askCmd
+$env:SSH_ASKPASS_REQUIRE = "force"
+$env:DISPLAY = "127.0.0.1:0"
+try {
+  ssh -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=60 $sshTarget $remoteCmd
+  $sshCode = $LASTEXITCODE
+}
+finally {
+  $plainPass = $null
+  $env:NAS_SSH_PASS = $null
+  $env:SSH_ASKPASS = $null
+  $env:SSH_ASKPASS_REQUIRE = $null
+  Remove-Item -LiteralPath $askCmd -Force -ErrorAction SilentlyContinue
+}
+if ($sshCode -ne 0) {
   Write-Host "SSH failed. Copy is done - run manually on NAS:" -ForegroundColor Yellow
   Write-Host "  cd /volume1/docker/essersales"
   Write-Host "  sudo docker compose -f docker-compose.nas.yml up -d --build"

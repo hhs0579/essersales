@@ -3,7 +3,6 @@
 import { computed, onMounted, ref, watch } from 'vue'
 
 import SalesDataView from '../SalesDataView.vue'
-import CombinedCommentsPage from '../CombinedCommentsPage.vue'
 
 import {
   getChannel,
@@ -12,6 +11,7 @@ import {
   getMode,
   getModeByScope,
   isManualOnlyChannel,
+  COMBINED_CHANNEL_ID,
   isCombinedCommentsChannel,
 } from '../../config/dataChannels.js'
 
@@ -50,6 +50,12 @@ const activeDashboardMode = ref('daily')
 function applyInitialScope(scope) {
 
   if (!scope) return
+
+  if (scope === 'coupang_1p_rocket') {
+    activeChannelId.value = COMBINED_CHANNEL_ID
+    activeDashboardMode.value = 'daily'
+    return
+  }
 
   const found = getModeByScope(scope)
 
@@ -92,6 +98,20 @@ onMounted(async () => {
 
 
 const dashboardChannels = getDashboardChannels()
+
+watch(
+  () => activeChannelId.value,
+  (id) => {
+    if (id === 'channel_d') {
+      activeChannelId.value = COMBINED_CHANNEL_ID
+      return
+    }
+    if (isCombinedCommentsChannel(id)) {
+      activeChannelId.value = COMBINED_CHANNEL_ID
+    }
+  },
+  { immediate: true },
+)
 
 const activeChannel = computed(() =>
   dashboardChannels.find((ch) => ch.id === activeChannelId.value) || dashboardChannels[0],
@@ -143,8 +163,9 @@ function dashboardModesFor(ch) {
 
     <p class="standard-ref">
       <strong>베스트하임 / 사본느리</strong>는 각각 일별·월별 대시보드가 있습니다.
-      <strong>파워프라이스 · 쿠팡 1P 로켓</strong>은 직접 입력 KPI를 표시합니다.
-      <strong>통합</strong>은 주간 보고용 합산, <strong>통합코멘트</strong>는 날짜별 담당 코멘트입니다.
+      <strong>파워프라이스</strong>는 직접 입력 KPI를 표시합니다.
+      <strong>쿠팡 1P 로켓</strong>은 플랫폼 업로드 탭에서 입력하고 통합 KPI에 반영됩니다.
+      <strong>통합</strong>은 주간 보고용 합산입니다.
     </p>
 
 
@@ -176,14 +197,6 @@ function dashboardModesFor(ch) {
 
 
     <div v-if="activeChannel" class="tab-panel">
-      <template v-if="isCombinedCommentsChannel(activeChannel.id)">
-        <header class="channel-head">
-          <h3 class="channel-title">{{ activeChannel.reportTitle }}</h3>
-          <span class="channel-badge">{{ activeChannel.tabLabel }}</span>
-        </header>
-        <CombinedCommentsPage />
-      </template>
-      <template v-else>
       <nav
         v-if="!isManualOnlyChannel(activeChannel.id) && dashboardModesFor(activeChannel).length > 1"
         class="inner-tabs mode-tabs"
@@ -214,7 +227,6 @@ function dashboardModesFor(ch) {
           :scope="scopeFor(activeChannel.id)"
         />
       </KeepAlive>
-      </template>
     </div>
 
   </section>

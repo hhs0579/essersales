@@ -113,43 +113,142 @@ function salesSnapshot(sales) {
   )
 }
 
+function sourceHasBase64(files) {
+  return (files || []).some((f) => typeof f?.dataBase64 === 'string' && f.dataBase64.length > 0)
+}
+
+/** 목록에 메타만 있고 base64가 비어 있는 원본이 있는지 */
+function hasMissingOwnMallSourceBase64(files) {
+  return (files || []).some(
+    (f) => (f?.id || f?.fileName) && !(typeof f?.dataBase64 === 'string' && f.dataBase64.length > 0),
+  )
+}
+
+/**
+ * omit_sources 메타에 서버 full GET의 dataBase64를 채웁니다.
+ * 로컬에 이미 있는 파일만 보강(삭제된 원본을 서버에서 되살리지 않음).
+ * @param {import('../config/ownMallManual.js').OwnMallSalesSourceFile[]} localFiles
+ * @param {import('../config/ownMallManual.js').OwnMallSalesSourceFile[]} serverFiles
+ */
+function fillOwnMallSourceBase64FromServer(localFiles, serverFiles) {
+  const byId = new Map(serverFiles.filter((f) => f.id && f.dataBase64).map((f) => [f.id, f]))
+  const byName = new Map(
+    serverFiles.filter((f) => f.fileName && f.dataBase64).map((f) => [f.fileName, f]),
+  )
+  return (localFiles || []).map((f) => {
+    if (f?.dataBase64) return f
+    const fromId = f.id ? byId.get(f.id) : null
+    if (fromId?.dataBase64) return { ...f, dataBase64: fromId.dataBase64 }
+    const fromName = f.fileName ? byName.get(f.fileName) : null
+    if (fromName?.dataBase64) return { ...f, dataBase64: fromName.dataBase64 }
+    return f
+  })
+}
+
+/**
+ * rebuild/persist 전에 omit_sources로 빠진 base64를 서버에서 보강합니다.
+ * @returns {Promise<import('../config/ownMallManual.js').OwnMallSalesSourceFile[]>}
+ */
+async function ensureOwnMallSourceBase64Loaded() {
+  const localFiles = Array.isArray(storeRef.value.salesSourceFiles)
+    ? storeRef.value.salesSourceFiles
+    : []
+  if (!localFiles.length || !hasMissingOwnMallSourceBase64(localFiles)) {
+    return localFiles
+  }
+
+  const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+  const serverFiles = normalizeSalesSourceFiles(full?.data?.salesSourceFiles)
+  const merged = fillOwnMallSourceBase64FromServer(localFiles, serverFiles)
+  storeRef.value = { ...storeRef.value, salesSourceFiles: merged }
+  return merged
+}
+
+/**
+ * omit_sources 하이드레이트 후 저장 시 dataBase64가 비어 DB 원본을 지우지 않도록
+ * 서버 full 설정과 id 기준으로 병합합니다.
+ */
+async function mergeOwnMallSourcesForPersist(store) {
+  const localFiles = Array.isArray(store?.salesSourceFiles) ? store.salesSourceFiles : []
+  if (!localFiles.length) return store
+  if (localFiles.every((f) => f?.dataBase64)) return store
+
+  let serverFiles = []
+  try {
+    const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+    serverFiles = normalizeSalesSourceFiles(full?.data?.salesSourceFiles)
+  } catch {
+    if (localFiles.some((f) => f.id || f.fileName) && !sourceHasBase64(localFiles)) {
+      throw new Error(
+        '자사몰 원본 엑셀을 불러오지 못해 저장을 중단했습니다. (업로드 원본 덮어쓰기 방지)',
+      )
+    }
+    return store
+  }
+
+  const merged = fillOwnMallSourceBase64FromServer(localFiles, serverFiles)
+
+  if (
+    merged.some((f) => f.id || f.fileName) &&
+    !sourceHasBase64(merged) &&
+    sourceHasBase64(serverFiles)
+  ) {
+    // 로컬 목록이 비정상 — 서버 원본 파일 유지, sales는 로컬 우선
+    return {
+      ...store,
+      salesSourceFiles: serverFiles,
+    }
+  }
+
+  return { ...store, salesSourceFiles: merged }
+}
+
 /** @returns {Promise<{ changed: boolean, skippedCanceled?: number }>} */
 export async function rebuildOwnMallSalesFromStoredSources({ persist = false } = {}) {
   if (rebuildPromise) return rebuildPromise
 
   rebuildPromise = (async () => {
-    const store = storeRef.value
-    let sources = (store.salesSourceFiles || []).filter((f) => f?.dataBase64)
-    if (!sources.length) {
-      // hydrate가 omit_sources였으면 full GET으로 원본 보강
-      try {
-        const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
-        if (full?.data) {
-          const normalized = normalizeStore(full.data)
-          storeRef.value = {
-            ...storeRef.value,
-            salesSourceFiles: normalized.salesSourceFiles,
-          }
-          sources = normalized.salesSourceFiles.filter((f) => f?.dataBase64)
-        }
-      } catch {
-        /* ignore */
+    // omit_sources 후 새 파일만 base64가 있어도 예전 원본을 반드시 보강한 뒤 전체 재파싱
+    let files
+    try {
+      files = await ensureOwnMallSourceBase64Loaded()
+    } catch {
+      files = storeRef.value.salesSourceFiles || []
+    }
+
+    if (hasMissingOwnMallSourceBase64(files)) {
+      const beforeExcelCount = (storeRef.value.sales || []).filter(
+        (s) => s.source !== 'manual',
+      ).length
+      const withB64 = (files || []).filter((f) => f?.dataBase64)
+      // 일부 원본만으로 sales를 갈아끼우면 이전 엑셀 판매가 삭제됨 → 중단
+      if (beforeExcelCount > 0 && withB64.length > 0 && withB64.length < files.length) {
+        throw new Error(
+          '자사몰 이전 업로드 원본을 불러오지 못해 판매 재구성을 중단했습니다. 새로고침 후 다시 시도하세요.',
+        )
       }
     }
+
+    const sources = (files || []).filter((f) => f?.dataBase64)
     if (!sources.length) {
       return { changed: false }
     }
 
     const before = salesSnapshot(storeRef.value.sales)
+    const beforeExcelCount = (storeRef.value.sales || []).filter((s) => s.source !== 'manual').length
     const { manual } = partitionOwnMallSales(storeRef.value.sales)
     const { excelSales, skippedCanceled } = await rebuildExcelSalesFromSources(
       storeRef.value.products,
       sources,
     )
+    // 파싱 결과가 비었는데 기존 엑셀 판매가 있으면 덮어쓰지 않음 (데이터 소실 방지)
+    if (!excelSales.length && beforeExcelCount > 0) {
+      return { changed: false, skippedCanceled }
+    }
     storeRef.value.sales = [...manual, ...excelSales]
 
     const changed = before !== salesSnapshot(storeRef.value.sales)
-    if (changed && persist) {
+    if (changed && persist && sourceHasBase64(storeRef.value.salesSourceFiles)) {
       await persistOwnMallManualStore()
     }
     return { changed, skippedCanceled }
@@ -163,9 +262,19 @@ export async function rebuildOwnMallSalesFromStoredSources({ persist = false } =
 }
 
 export async function persistOwnMallManualStore() {
-  const res = await saveAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND, storeRef.value)
+  const payload = await mergeOwnMallSourcesForPersist(storeRef.value)
+  const res = await saveAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND, payload)
   if (res?.data) {
-    storeRef.value = normalizeStore(res.data)
+    // 응답에 base64가 없어도(프록시 생략 등) 방금 저장한 payload 유지
+    const normalized = normalizeStore(res.data)
+    if (!sourceHasBase64(normalized.salesSourceFiles) && sourceHasBase64(payload.salesSourceFiles)) {
+      storeRef.value = {
+        ...normalized,
+        salesSourceFiles: payload.salesSourceFiles,
+      }
+    } else {
+      storeRef.value = normalized
+    }
   }
 }
 
@@ -187,16 +296,42 @@ export async function hydrateOwnMallManualStore(opts = {}) {
         let normalized = normalizeStore(res.data)
         const empty =
           !normalized.products.length && !normalized.sales.length
-        if (empty) {
+        const needsSourceRebuild =
+          !normalized.sales.length &&
+          normalized.salesSourceFiles.some((f) => f.id || f.fileName)
+        // products만 있고 sales가 원본(base64)에만 있는 경우도 full 보강
+        if (empty || needsSourceRebuild) {
           res = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
           if (res?.data) normalized = normalizeStore(res.data)
         }
         storeRef.value = normalized
         hydrated = true
-        const hasBase64 = storeRef.value.salesSourceFiles.some((f) => f.dataBase64)
-        if (hasBase64) {
+        const hasBase64 = sourceHasBase64(storeRef.value.salesSourceFiles)
+        const sourceMetaCount = (storeRef.value.salesSourceFiles || []).filter(
+          (f) => f.id || f.fileName,
+        ).length
+        const excelImportIds = new Set(
+          (storeRef.value.sales || [])
+            .filter((s) => s.source !== 'manual' && s.importSourceId)
+            .map((s) => s.importSourceId),
+        )
+        // omit_sources 버그로 sales만 잘린 경우: 원본 메타보다 import 출처가 적으면 full+재파싱
+        const salesMayBeIncomplete =
+          sourceMetaCount > 0 && excelImportIds.size < sourceMetaCount
+        // 하이드레이트 직후 DB에 빈 원본을 쓰지 않음 — sales 복원만 하고
+        // persist는 base64가 있을 때만(merge 가드 포함)
+        if (
+          hasBase64 ||
+          (!storeRef.value.sales.length && needsSourceRebuild) ||
+          salesMayBeIncomplete
+        ) {
           try {
-            await rebuildOwnMallSalesFromStoredSources({ persist: true })
+            if (salesMayBeIncomplete && !hasBase64) {
+              await ensureOwnMallSourceBase64Loaded()
+            }
+            await rebuildOwnMallSalesFromStoredSources({
+              persist: sourceHasBase64(storeRef.value.salesSourceFiles),
+            })
           } catch (e) {
             console.warn('자사몰 원본 재파싱 실패:', e)
           }
@@ -289,13 +424,17 @@ export function useOwnMallManual() {
     storeRef.value.salesSourceFiles = (storeRef.value.salesSourceFiles || []).filter(
       (f) => f.id !== id,
     )
-    const { manual } = partitionOwnMallSales(storeRef.value.sales)
-    const { excelSales } = await rebuildExcelSalesFromSources(
-      storeRef.value.products,
-      storeRef.value.salesSourceFiles,
-    )
-    storeRef.value.sales = [...manual, ...excelSales]
-    await persistOwnMallManualStore()
+
+    const remaining = storeRef.value.salesSourceFiles || []
+    if (!remaining.length) {
+      const { manual } = partitionOwnMallSales(storeRef.value.sales)
+      storeRef.value.sales = manual
+      await persistOwnMallManualStore()
+      return { changed: true }
+    }
+
+    // 남은 원본의 omit_sources base64를 보강한 뒤 전체 재파싱
+    await rebuildOwnMallSalesFromStoredSources({ persist: true })
     return { changed: true }
   }
 

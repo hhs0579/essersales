@@ -17,8 +17,8 @@ function toStr(val) {
   return String(val)
 }
 
-/** PostgreSQL records item → legacy rowToRecord 호환 형식 */
-export function adaptPgRecord(item) {
+
+/** PostgreSQL records item → legacy rowToRecord 호환 형식 */export function adaptPgRecord(item) {
   if (!item) return null
   const data = item.data && typeof item.data === 'object' ? item.data : {}
 
@@ -26,7 +26,20 @@ export function adaptPgRecord(item) {
   const businessDate = toDateString(item.businessDate ?? item.business_date)
   const date = orderDate || businessDate || toDateString(data.date)
 
-  return {
+  const uploadKind = item.uploadKind || item.upload_kind || data.uploadKind || ''
+  const uploadFormat = item.uploadFormat || item.upload_format || data.uploadFormat || ''
+  const closedMall =
+    uploadKind === 'bestheim_closed_mall' ||
+    uploadKind === 'esser_closed_mall' ||
+    uploadFormat === 'BESTHEIM_CLOSED_MALL' ||
+    uploadFormat === 'ESSER_CLOSED_MALL'
+
+  const storeName = toStr(item.storeName || item.store_name || data.storeName || data.closedMallSeller)
+  const productBrand = closedMall
+    ? toStr(data.productBrand || data.brand)
+    : toStr(data.productBrand || '')
+
+  const row = {
     ...data,
     id: item.id,
     uploadId: item.uploadId ?? item.upload_id,
@@ -35,28 +48,38 @@ export function adaptPgRecord(item) {
     updatedAt: item.updatedAt ?? item.updated_at,
     date,
     orderDate,
+    order_date: orderDate,
     businessDate,
+    periodFrom: toDateString(item.periodFrom ?? item.period_from ?? data.periodFrom),
+    periodTo: toDateString(item.periodTo ?? item.period_to ?? data.periodTo),
     platform: item.platform || data.platform || data.channel || '',
     channel: item.channel || data.channel || item.platform || '',
-    salesMethod: item.salesMethod || data.salesMethod || '',
-    brand: item.storeName || data.brand || data.storeName || '',
-    storeName: item.storeName || data.storeName || data.brand || '',
-    productCode: item.productCode || data.productCode || '',
-    productName: item.productName || data.productName || '',
-    option: item.optionName || data.option || '',
+    salesMethod: item.salesMethod || item.sales_method || data.salesMethod || '',
+    productCode: item.productCode || item.product_code || data.productCode || '',
+    productName: item.productName || item.product_name || data.productName || '',
+    option: item.optionName || item.option_name || data.option || '',
     sales: item.sales != null ? toStr(item.sales) : toStr(data.sales ?? data.actualPayment),
     salesQty:
       item.salesQty != null
         ? toStr(item.salesQty)
-        : toStr(data.salesQty ?? data.quantity),
+        : toStr(item.sales_qty ?? data.salesQty ?? data.quantity),
     netProfit:
       item.netProfit != null ? toStr(item.netProfit) : toStr(data.netProfit ?? data.margin),
     adSpend: item.adSpend != null ? toStr(item.adSpend) : toStr(data.adSpend),
-    transactionType: item.transactionType || data.transactionType || '',
-    uploadKind: item.uploadKind || data.uploadKind || '',
-    uploadFormat: item.uploadFormat || data.uploadFormat || '',
+    transactionType: item.transactionType || item.transaction_type || data.transactionType || '',
+    uploadKind,
+    upload_kind: uploadKind,
+    uploadFormat,
+    upload_format: uploadFormat,
     sourceFileName: data.sourceFileName || '',
+    dataSourceLabel: data.dataSourceLabel || '',
+    closedMallSeller: data.closedMallSeller || storeName,
+    productBrand,
+    brand: closedMall ? productBrand : storeName || data.brand || data.storeName || '',
+    storeName: closedMall ? storeName : storeName || data.storeName || data.brand || '',
   }
+
+  return row
 }
 
 /** @param {unknown[]} items */

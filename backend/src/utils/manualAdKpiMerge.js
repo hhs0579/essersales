@@ -11,8 +11,8 @@ const MANUAL_AD_SOURCE_DEFS = [
 
 // 월별도 일별 데이터 기반이므로 광고는 항상 일별 scope에서 조회 (일별=월별 동일)
 const COMBINED_SCOPES = {
-  combined_daily: ['platform', 'company_b', 'power_price'],
-  combined_monthly: ['platform', 'company_b', 'power_price'],
+  combined_daily: ['platform', 'company_b', 'power_price', 'other_sellers'],
+  combined_monthly: ['platform', 'company_b', 'power_price', 'other_sellers'],
 }
 
 const MONTHLY_TO_DAILY_SCOPE = {

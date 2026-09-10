@@ -1,4 +1,10 @@
 import { isCombinedScope } from '../../config/dataChannels.js'
+import {
+  isCoupang1pRocketRecord,
+  isBestheimCoupang1pRow,
+  isEsserCoupang1pRow,
+  coupang1pBrandKeyFromRow,
+} from '../../config/coupang1pRocket.js'
 import { deriveEsserProfitKpis, finalizeEsserBucket, aggregateEsserByDay } from '../../utils/esserMetrics.js'
 import {
   applyRecordFilters,
@@ -7,11 +13,29 @@ import {
 import {
   buildPlatformKpiSplitRows,
   buildMergedTotalRow,
+  buildCombinedKpiSplitRows,
   isManualAdKpiLabel,
 } from '../../utils/platformKpiSplit.js'
+import { COMBINED_SEGMENT_DEFS } from '../../utils/combinedKpiSegments.js'
+
+const COUPANG_COMBINED_SEGMENT_LABELS = new Set(['베스트하임(로켓)', '에쎄르(로켓)'])
 
 export function shouldMergeCoupang1pKpi(scope) {
-  return scope === 'platform' || scope === 'platform_monthly' || isCombinedScope(scope)
+  return (
+    scope === 'platform' ||
+    scope === 'platform_monthly' ||
+    scope === 'company_b' ||
+    scope === 'company_b_monthly' ||
+    isCombinedScope(scope)
+  )
+}
+
+/** @param {object[]} records @param {'bestheim'|'esser'} brandKey */
+export function filterCoupang1pRecordsByBrand(records, brandKey) {
+  return (records || []).filter((row) => {
+    if (!isCoupang1pRocketRecord(row)) return false
+    return coupang1pBrandKeyFromRow(row) === brandKey
+  })
 }
 
 function filterCoupang1pRecordsForKpi(records, filterCtx = {}) {
@@ -59,7 +83,7 @@ function mergePlatformSplitRow(base, addon) {
   }
 }
 
-/** 쿠팡 1P 로켓 발주 → 베스트하임 쿠팡 플랫폼 행 */
+/** 쿠팡 1P 로켓 발주 → 쿠팡 플랫폼 행 */
 export function buildCoupang1pPlatformRow(c1pRecords, filterCtx = {}) {
   const filtered = filterCoupang1pRecordsForKpi(c1pRecords, filterCtx)
   if (!filtered.length) return null
@@ -72,8 +96,13 @@ export function buildCoupang1pPlatformRow(c1pRecords, filterCtx = {}) {
  * @param {ReturnType<import('./platformKpiAdapter.js').adaptServerPlatformKpiRows>} serverRows
  */
 export function mergeCoupang1pIntoServerPlatformRows(serverRows, c1pRecords, filterCtx = {}) {
-  if (!serverRows?.length) return serverRows
   const c1pRow = buildCoupang1pPlatformRow(c1pRecords, filterCtx)
+  if (!serverRows?.length) {
+    if (!c1pRow) return serverRows || []
+    const smart = { label: '스마트스토어', profit: {}, ad: {}, rowCount: 0 }
+    const total = buildMergedTotalRow(c1pRow, smart, null, [], null)
+    return [c1pRow, smart, total]
+  }
   if (!c1pRow) return serverRows
 
   const manualAdRows = serverRows.filter((r) => isManualAdKpiLabel(r.label))
@@ -98,6 +127,74 @@ export function mergeCoupang1pIntoServerPlatformRows(serverRows, c1pRecords, fil
 
   const marketplace = [coupang, smart, ownMall].filter(Boolean)
   return [...marketplace, ...manualAdRows, total]
+}
+
+/**
+ * 통합 by-segment — 쿠팡 1P 직접입력 세그먼트(베스트하임·에쎄르 로켓) 보강
+ * 서버 응답에 행이 없거나 매출 0일 때 클라 스토어 데이터로 채움 (이중 합산 방지)
+ * @param {ReturnType<import('./platformKpiAdapter.js').adaptServerSegmentKpiRows>} serverRows
+ */
+export function mergeCoupang1pIntoCombinedSegmentRows(serverRows, c1pRecords, filterCtx = {}) {
+  const bestheim = filterCoupang1pRecordsForKpi(
+    filterCoupang1pRecordsByBrand(c1pRecords, 'bestheim'),
+    filterCtx,
+  )
+  const esser = filterCoupang1pRecordsForKpi(
+    filterCoupang1pRecordsByBrand(c1pRecords, 'esser'),
+    filterCtx,
+  )
+  if (!bestheim.length && !esser.length) return serverRows || []
+
+  const split = buildCombinedKpiSplitRows(
+    [...bestheim, ...esser],
+    [...bestheim, ...esser],
+    [],
+    filterCtx,
+  )
+  const addons = split.filter((r) => COUPANG_COMBINED_SEGMENT_LABELS.has(r.label))
+  if (!addons.length) return serverRows || []
+
+  const map = new Map((serverRows || []).map((r) => [r.label, r]))
+  let patched = false
+
+  for (const addon of addons) {
+    const prev = map.get(addon.label)
+    const prevSales = Number(prev?.profit?.sales ?? 0)
+    const addonSales = Number(addon.profit?.sales ?? 0)
+    if (!addonSales && !addon.rowCount) continue
+
+    if (!prev) {
+      map.set(addon.label, addon)
+      patched = true
+      continue
+    }
+    if (prevSales === 0 && addonSales > 0) {
+      map.set(addon.label, mergePlatformSplitRow(prev, addon))
+      patched = true
+    }
+  }
+
+  if (!patched) return serverRows || []
+
+  const out = []
+  const seen = new Set()
+  for (const row of serverRows || []) {
+    if (row.label === '합계') continue
+    if (isManualAdKpiLabel(row.label)) continue
+    out.push(map.get(row.label) || row)
+    seen.add(row.label)
+  }
+  for (const def of COMBINED_SEGMENT_DEFS) {
+    if (!COUPANG_COMBINED_SEGMENT_LABELS.has(def.label)) continue
+    if (seen.has(def.label)) continue
+    const row = map.get(def.label)
+    if (!row) continue
+    out.push(row)
+    seen.add(def.label)
+  }
+  const manual = (serverRows || []).filter((r) => isManualAdKpiLabel(r.label))
+  const total = map.get('합계') || serverRows?.find((r) => r.label === '합계')
+  return [...out, ...manual, total].filter(Boolean)
 }
 
 /** Server KPI summary bucket + 쿠팡 1P */
@@ -164,3 +261,5 @@ export function mergeCoupang1pIntoDailyBuckets(buckets, c1pRecords, filterCtx = 
 
   return [...map.values()].sort((a, b) => (a.sortTime || 0) - (b.sortTime || 0))
 }
+
+export { isBestheimCoupang1pRow, isEsserCoupang1pRow }

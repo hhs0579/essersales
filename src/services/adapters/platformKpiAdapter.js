@@ -37,10 +37,21 @@ function platformItemToRow(item) {
   productKpi.totalCost = cost
   productKpi.adSpend = adSpend
 
-  const estimateMargin = item.platform === '스마트스토어'
+  const estimateMargin =
+    item.estimateCostFromMargin === true ||
+    item.segmentKey === 'bh_ss' ||
+    item.segmentKey === 'sbn_ss' ||
+    item.platform === '스마트스토어'
 
   return {
-    label: item.platform,
+    label: item.segment || item.platform,
+    kind:
+      item.segmentKey === 'special_sale'
+        ? 'special_sale'
+        : item.segmentKey === 'manual_expense'
+          ? 'manual_expense'
+          : undefined,
+    segmentKey: item.segmentKey ?? null,
     profit: deriveEsserProfitKpis(adBucket, {
       estimateCostFromMargin: estimateMargin,
       productKpi: adBucket,
@@ -61,9 +72,36 @@ export function adaptServerPlatformKpiRows(res) {
     rows.push(platformItemToRow(item))
   }
   if (res.totalRow) {
-    rows.push(platformItemToRow({ ...res.totalRow, platform: '합계' }))
+    rows.push(platformItemToRow({ ...res.totalRow, platform: '합계', segment: '합계' }))
   }
   return rows
+}
+
+/** by-platform 실패·빈 응답 시 summary만으로 합계 행 생성 */
+export function buildFallbackPlatformRowsFromSummary(summary) {
+  if (!summary) return []
+  return [
+    platformItemToRow({
+      platform: '합계',
+      segment: '합계',
+      salesTotal: summary.salesTotal,
+      quantityTotal: summary.quantityTotal,
+      netProfitAfterManualAd: summary.netProfitAfterManualAd,
+      netProfitTotal: summary.netProfitTotal,
+      costTotal: summary.costTotal,
+      adSpendTotal: summary.adSpendTotal,
+      adSalesTotal: summary.adSalesTotal,
+      recordCount: summary.recordCount,
+    }),
+  ]
+}
+
+/**
+ * Server by-segment → buildCombinedKpiSplitRows 호환 (동일 row 형태)
+ * @param {{ items?: unknown[], totalRow?: unknown, manualAdItems?: unknown[] }} res
+ */
+export function adaptServerSegmentKpiRows(res) {
+  return adaptServerPlatformKpiRows(res)
 }
 
 /**
@@ -98,7 +136,10 @@ export function adaptServerDayOverDayRows(res) {
 export function adaptPgKpiByPlatform(res) {
   if (!res) return { items: [], total: 0, totalRow: null, manualAdItems: [] }
   const mapItem = (item) => ({
-    platform: item.platform || '',
+    platform: item.platform || item.segment || '',
+    segment: item.segment || item.platform || '',
+    segmentKey: item.segmentKey ?? null,
+    estimateCostFromMargin: item.estimateCostFromMargin === true,
     salesTotal: Number(item.salesTotal ?? 0),
     quantityTotal: Number(item.quantityTotal ?? 0),
     recordCount: Number(item.recordCount ?? 0),
@@ -117,10 +158,17 @@ export function adaptPgKpiByPlatform(res) {
     items: (res.items || []).map(mapItem),
     manualAdItems: (res.manualAdItems || []).map(mapItem),
     total: Number(res.total ?? res.items?.length ?? 0),
-    totalRow: res.totalRow ? mapItem({ ...res.totalRow, platform: '합계' }) : null,
+    totalRow: res.totalRow
+      ? mapItem({ ...res.totalRow, platform: '합계', segment: '합계' })
+      : null,
     manualAdSpendTotal: Number(res.manualAdSpendTotal ?? 0),
     filters: res.filters ?? null,
   }
+}
+
+/** @param {{ items?: unknown[], totalRow?: unknown, manualAdItems?: unknown[] } | null} res */
+export function adaptPgKpiBySegment(res) {
+  return adaptPgKpiByPlatform(res)
 }
 
 export function adaptPgKpiCompareYesterday(res) {
