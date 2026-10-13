@@ -2,6 +2,10 @@ import { Router } from 'express'
 import { listUploads, getUploadById } from '../repositories/uploadsRepository.js'
 import { deleteUpload } from '../services/uploadsWriteService.js'
 import { processExcelUpload } from '../services/uploadExcelWriteService.js'
+import {
+  openUploadOriginalFile,
+  pipeUploadOriginalToResponse,
+} from '../services/uploadOriginalFileService.js'
 import { excelUploadMiddleware } from '../middleware/uploadMulter.js'
 import { decodeMultipartFilename } from '../../../src/utils/textEncoding.js'
 import { invalidateKpiCache } from './kpi.js'
@@ -44,6 +48,19 @@ uploadsRouter.post('/excel', (req, res, next) => {
       next(e)
     }
   })
+})
+
+/** 업로드 원본 엑셀 재다운로드 — `/:id` 보다 먼저 등록 */
+uploadsRouter.get('/:id/file', async (req, res, next) => {
+  try {
+    const file = await openUploadOriginalFile(req.params.id)
+    pipeUploadOriginalToResponse(res, file)
+  } catch (err) {
+    if (err.status === 404) {
+      return res.status(404).json({ error: err.message, code: err.code || 'NOT_FOUND' })
+    }
+    next(err)
+  }
 })
 
 uploadsRouter.get('/:id', async (req, res, next) => {

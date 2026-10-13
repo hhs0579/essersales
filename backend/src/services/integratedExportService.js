@@ -2,12 +2,10 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import fs from 'fs'
 import { loadExportPayload } from './exportDataLoadService.js'
+import { acquireExportSlot, throwIfClientGone } from './exportGate.js'
 import { EXPORT_BUILD_ID } from '../constants/exportBuild.js'
 
 export { EXPORT_BUILD_ID }
-
-/** NAS — export 동시 1건만 (메모리 OOM 방지) */
-let exportInFlight = false
 
 /**
  * exceljs/xlsx는 export 시에만 동적 import (API 기동 RAM 절약)
@@ -22,16 +20,10 @@ async function buildWorkbookFile(payload) {
 
 /**
  * @param {Record<string, string | undefined>} query
+ * @param {{ isAborted?: () => boolean }} [opts]
  */
-export async function buildIntegratedExport(query = {}) {
-  if (exportInFlight) {
-    const err = new Error('다른 엑셀 생성이 진행 중입니다. 잠시 후 다시 시도해 주세요.')
-    err.status = 503
-    err.code = 'EXPORT_BUSY'
-    throw err
-  }
-
-  exportInFlight = true
+export async function buildIntegratedExport(query = {}, opts = {}) {
+  const release = acquireExportSlot('integrated')
   const t0 = performance.now()
   console.log('[export] start', {
     scope: query.scope,
@@ -46,8 +38,10 @@ export async function buildIntegratedExport(query = {}) {
       records: payload.records?.length ?? 0,
       ms: Math.round(performance.now() - t0),
     })
+    throwIfClientGone(opts.isAborted)
 
     const result = await buildWorkbookFile(payload)
+    throwIfClientGone(opts.isAborted)
 
     const exportDir = process.env.EXPORT_DIR || './exports'
     if (!fs.existsSync(exportDir)) {
@@ -71,6 +65,6 @@ export async function buildIntegratedExport(query = {}) {
       integratedSummary: result.integratedSummary,
     }
   } finally {
-    exportInFlight = false
+    release()
   }
 }

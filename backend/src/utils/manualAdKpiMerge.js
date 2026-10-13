@@ -9,6 +9,14 @@ const MANUAL_AD_SOURCE_DEFS = [
   { value: 'google_traffic', kpiLabel: '구글 트래픽' },
 ]
 
+function formatExternalAdKpiLabel(brandLabel, platformKpiLabel) {
+  const brand = String(brandLabel || '').trim()
+  const platform = String(platformKpiLabel || '').trim()
+  if (!platform) return brand
+  if (!brand || brand === '통합' || brand === '외부 광고') return platform
+  return `${brand}-${platform}`
+}
+
 // 월별도 일별 데이터 기반이므로 광고는 항상 일별 scope에서 조회 (일별=월별 동일)
 const COMBINED_SCOPES = {
   combined_daily: ['platform', 'company_b', 'power_price', 'other_sellers'],
@@ -223,10 +231,15 @@ function buildManualAdPlatformItem(label, entries, filterCtx) {
   }
 }
 
-export function mergePlatformWithManual(result, manualEntries, filterCtx) {
+export function mergePlatformWithManual(result, manualEntries, filterCtx, opts = {}) {
+  const brandLabel = opts.brandLabel || ''
   const bySource = groupManualAdEntriesBySource(manualEntries)
   const manualItems = MANUAL_AD_SOURCE_DEFS.map((def) =>
-    buildManualAdPlatformItem(def.kpiLabel, bySource[def.value], filterCtx),
+    buildManualAdPlatformItem(
+      formatExternalAdKpiLabel(brandLabel, def.kpiLabel),
+      bySource[def.value],
+      filterCtx,
+    ),
   ).filter(Boolean)
 
   const manualSpend = totalManualAdSpend(manualEntries, filterCtx)

@@ -96,6 +96,121 @@ export async function upsertSetting(scope, kind, data) {
   return mapSettingRow(res.rows[0])
 }
 
+/** own_mall_manual은 원본 엑셀(base64)을 포함해 커서 이력을 적게 보관 */
+function historyKeepCount(kind) {
+  return kind === 'own_mall_manual' ? 5 : 50
+}
+
+/**
+ * 낙관적 잠금 + 이력 보관 저장.
+ * @param {string} scope
+ * @param {string} kind
+ * @param {(existingData: unknown) => unknown} buildPayload 잠금 획득 후 기존 data로 최종 payload 생성
+ * @param {{ checkBase?: boolean, baseUpdatedAt?: string | null, needExistingData?: boolean }} [opts]
+ * @returns {Promise<{ conflict: true, current: { updatedAt: Date | null } } | { conflict: false, row: ReturnType<typeof mapSettingRow> }>}
+ */
+export async function saveSettingWithHistory(scope, kind, buildPayload, opts = {}) {
+  const pool = getPool()
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const cur = await client.query(
+      `SELECT updated_at${opts.needExistingData ? ', data' : ''}
+       FROM app_settings WHERE scope = $1 AND kind = $2 FOR UPDATE`,
+      [scope, kind],
+    )
+    const existing = cur.rows[0] || null
+
+    if (opts.checkBase) {
+      const base = opts.baseUpdatedAt
+      const serverMs = existing?.updated_at ? new Date(existing.updated_at).getTime() : null
+      const baseMs = base ? new Date(base).getTime() : null
+      if (serverMs !== baseMs) {
+        await client.query('ROLLBACK')
+        return { conflict: true, current: { updatedAt: existing?.updated_at ?? null } }
+      }
+    }
+
+    const payload = buildPayload(existing?.data ?? null)
+    const json = JSON.stringify(payload ?? null)
+
+    if (existing) {
+      await client.query(
+        `INSERT INTO app_settings_history (scope, kind, data, updated_at)
+         SELECT scope, kind, data, updated_at FROM app_settings
+         WHERE scope = $1 AND kind = $2 AND data IS DISTINCT FROM $3::jsonb`,
+        [scope, kind, json],
+      )
+      await client.query(
+        `DELETE FROM app_settings_history
+         WHERE scope = $1 AND kind = $2
+           AND id < COALESCE((
+             SELECT id FROM app_settings_history
+             WHERE scope = $1 AND kind = $2
+             ORDER BY id DESC OFFSET $3 LIMIT 1
+           ), 0)`,
+        [scope, kind, historyKeepCount(kind) - 1],
+      )
+    }
+
+    const res = await client.query(
+      `INSERT INTO app_settings (scope, kind, data, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW())
+       ON CONFLICT (scope, kind)
+       DO UPDATE SET
+         data = EXCLUDED.data,
+         updated_at = NOW()
+       RETURNING scope, kind, data, updated_at,
+                 octet_length(data::text) AS data_size`,
+      [scope, kind, json],
+    )
+    await client.query('COMMIT')
+    return { conflict: false, row: mapSettingRow(res.rows[0]) }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+export async function listSettingHistory(scope, kind) {
+  const pool = getPool()
+  const res = await pool.query(
+    `SELECT id, scope, kind, updated_at, replaced_at, octet_length(data::text) AS data_size
+     FROM app_settings_history
+     WHERE scope = $1 AND kind = $2
+     ORDER BY id DESC`,
+    [scope, kind],
+  )
+  return res.rows.map((r) => ({
+    id: Number(r.id),
+    scope: r.scope,
+    kind: r.kind,
+    updatedAt: r.updated_at,
+    replacedAt: r.replaced_at,
+    dataSize: Number(r.data_size || 0),
+  }))
+}
+
+export async function getSettingHistoryEntry(id) {
+  const pool = getPool()
+  const res = await pool.query(
+    `SELECT id, scope, kind, data, updated_at, replaced_at FROM app_settings_history WHERE id = $1`,
+    [id],
+  )
+  const r = res.rows[0]
+  if (!r) return null
+  return {
+    id: Number(r.id),
+    scope: r.scope,
+    kind: r.kind,
+    data: r.data,
+    updatedAt: r.updated_at,
+    replacedAt: r.replaced_at,
+  }
+}
+
 /**
  * @param {Record<string, string | undefined>} query
  */

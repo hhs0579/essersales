@@ -22,6 +22,12 @@ export const COMBINED_CHANNEL = {
       uploadKind: 'combined_daily',
     },
     {
+      id: 'weekly',
+      label: '주간 통합',
+      scope: COMBINED_DAILY_SCOPE,
+      uploadKind: 'combined_daily',
+    },
+    {
       id: 'monthly',
       label: '월별 통합',
       scope: COMBINED_MONTHLY_SCOPE,

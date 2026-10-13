@@ -55,13 +55,6 @@ import {
   combinedSourceScopes,
   combinedIncludesPowerPrice,
 } from './combinedChannel.js'
-import {
-  COMBINED_COMMENTS_CHANNEL,
-  COMBINED_COMMENTS_CHANNEL_ID,
-  COMBINED_COMMENTS_SCOPE,
-  isCombinedCommentsScope,
-  isCombinedCommentsChannel,
-} from './combinedCommentsChannel.js'
 
 /** @type {DataChannel[]} */
 
@@ -258,7 +251,6 @@ export function getDefaultChannelId() {
 
 export function getChannel(channelId) {
   if (channelId === COMBINED_CHANNEL_ID) return COMBINED_CHANNEL
-  if (channelId === COMBINED_COMMENTS_CHANNEL_ID) return COMBINED_COMMENTS_CHANNEL
   return DATA_CHANNELS.find((c) => c.id === channelId) || DATA_CHANNELS[0]
 }
 
@@ -281,7 +273,6 @@ export function getDashboardChannels() {
 
 export function getChannelByScope(scope) {
   if (isCombinedScope(scope)) return COMBINED_CHANNEL
-  if (isCombinedCommentsScope(scope)) return COMBINED_COMMENTS_CHANNEL
 
   if (scope === 'platform_period') scope = 'platform'
 
@@ -315,12 +306,6 @@ export function getModeByScope(scope) {
   if (isCombinedScope(scope)) {
     const mode = COMBINED_CHANNEL.modes.find((m) => m.scope === scope)
     if (mode) return { channel: COMBINED_CHANNEL, mode }
-  }
-  if (isCombinedCommentsScope(scope)) {
-    return {
-      channel: COMBINED_COMMENTS_CHANNEL,
-      mode: COMBINED_COMMENTS_CHANNEL.modes[0],
-    }
   }
 
   for (const ch of DATA_CHANNELS) {
@@ -547,11 +532,6 @@ export {
   combinedIncludesPowerPrice,
   COMBINED_CHANNEL,
   COMBINED_CHANNEL_ID,
-  COMBINED_COMMENTS_CHANNEL,
-  COMBINED_COMMENTS_CHANNEL_ID,
-  COMBINED_COMMENTS_SCOPE,
-  isCombinedCommentsScope,
-  isCombinedCommentsChannel,
 }
 
 

@@ -29,7 +29,8 @@ function lastDayOfMonth(year, month) {
 }
 
 /**
- * 월별 scope — 연·월 기준으로 해당 월 1~말일 필터 (일별 7일 range와 year/month 불일치 방지)
+ * 월별 scope — 연·월이 있으면 기본은 1~말일.
+ * 사용자가 dateFrom/dateTo로 기간을 줄였으면 그 기간을 그대로 씀.
  * @param {string} scope
  * @param {object} filters
  */
@@ -39,25 +40,45 @@ export function buildOwnMallKpiFilterCtx(scope, filters = {}) {
 
   const y = String(filters.year || '').trim()
   const mo = String(filters.month || '').trim()
+  const from = String(filters.dateFrom || '').trim()
+  const to = String(filters.dateTo || '').trim()
+  const hasRange = /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)
+
   if (/^\d{4}$/.test(y) && /^\d{1,2}$/.test(mo)) {
     const month = Number(mo)
     const padMo = String(month).padStart(2, '0')
     const last = lastDayOfMonth(Number(y), month)
+    const monthStart = `${y}-${padMo}-01`
+    const monthEnd = `${y}-${padMo}-${String(last).padStart(2, '0')}`
     return {
       ...base,
       year: y,
       month: String(month),
-      dateFrom: `${y}-${padMo}-01`,
-      dateTo: `${y}-${padMo}-${String(last).padStart(2, '0')}`,
+      dateFrom: hasRange ? from : monthStart,
+      dateTo: hasRange ? to : monthEnd,
       dayOfWeek: '',
       period: 'monthly',
     }
   }
 
-  const to = String(filters.dateTo || filters.dateFrom || '').trim()
-  if (/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+  if (hasRange) {
     const yy = to.slice(0, 4)
     const mm = String(Number(to.slice(5, 7)))
+    return {
+      ...base,
+      year: yy,
+      month: mm,
+      dateFrom: from,
+      dateTo: to,
+      dayOfWeek: '',
+      period: 'monthly',
+    }
+  }
+
+  const fallbackTo = String(filters.dateTo || filters.dateFrom || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fallbackTo)) {
+    const yy = fallbackTo.slice(0, 4)
+    const mm = String(Number(fallbackTo.slice(5, 7)))
     const month = Number(mm)
     const padMo = String(month).padStart(2, '0')
     const last = lastDayOfMonth(Number(yy), month)

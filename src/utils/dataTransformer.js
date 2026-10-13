@@ -1,10 +1,11 @@
 import { emptyStandardRow } from '../constants/standardColumns.js'
 import { MAPPABLE_KEYS } from '../config/channelMappings.js'
+import { excelDateToYmd } from './dateParse.js'
 
 function formatCell(value) {
   if (value == null || value === '') return ''
   if (value instanceof Date) {
-    return value.toISOString().slice(0, 10)
+    return excelDateToYmd(value)
   }
   return String(value).trim()
 }

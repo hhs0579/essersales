@@ -97,7 +97,11 @@ function detectNaverAdColumns(fmtAoa) {
 export async function parseNaverAdCenterExcelFile(file) {
   const XLSX = await loadXlsx()
   const buffer = await file.arrayBuffer()
-  const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true })
+  const workbook = XLSX.read(new Uint8Array(buffer), {
+    type: 'array',
+    cellDates: true,
+    dateNF: 'yyyy-mm-dd',
+  })
   const sheetName = workbook.SheetNames[0]
   const sheet = workbook.Sheets[sheetName]
   const fmtAoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false })

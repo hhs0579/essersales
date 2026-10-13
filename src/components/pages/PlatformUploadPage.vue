@@ -435,7 +435,8 @@ function goDashboard() {
           <p class="standard-ref history-hint">
             체크한 파일만
             <strong>매출 대시보드 → 기타 판매처</strong>
-            · 통합에 반영됩니다. 삭제하면 해당 파일 데이터도 함께 제거됩니다.
+            · 통합에 반영됩니다. <strong>원본 받기</strong>로 업로드했던 엑셀을 다시 받을 수 있습니다.
+            삭제하면 해당 파일 데이터도 함께 제거됩니다.
           </p>
           <UploadHistoryList
             :uploads="closedMallUploadsForBrand(closedMallBrandKey)"
@@ -524,7 +525,7 @@ function goDashboard() {
 
             <strong>매출 대시보드 → {{ ch.tabLabel }} → {{ getMode(ch.id, activeUploadMode).label }}</strong>
 
-            에 반영됩니다.
+            에 반영됩니다. <strong>원본 받기</strong>로 업로드했던 엑셀을 다시 받을 수 있습니다.
 
           </p>
 

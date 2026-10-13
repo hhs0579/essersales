@@ -37,6 +37,7 @@ import {
   NAVER_DISPLAY_AD_KPI_LABEL,
   AD_KPI_LABEL,
   GOOGLE_TRAFFIC_KPI_LABEL,
+  formatExternalAdKpiLabel,
   isManualAdKpiLabel,
 } from '../config/manualAdSpend.js'
 import { buildSpecialSaleKpiRows, isSpecialSaleRowLabel } from './specialSaleKpi.js'
@@ -52,6 +53,7 @@ export {
   AD_KPI_LABEL,
   GOOGLE_TRAFFIC_KPI_LABEL,
   MANUAL_AD_KPI_LABELS,
+  formatExternalAdKpiLabel,
   isManualAdKpiLabel,
 } from '../config/manualAdSpend.js'
 
@@ -332,14 +334,23 @@ export function buildOtherSellersKpiSplitRows(sourceRecords) {
 
  */
 
-function buildManualAdKpiRows(manualEntries, manualFilterCtx) {
-  const bySource = groupManualAdEntriesBySource(manualEntries)
+/**
+ * 채널(브랜드)×광고 플랫폼별 KPI 행 — 예: 베스트하임-Meta, 사본느리-GFA
+ * @param {Array<{ label: string, entries?: import('../config/manualAdSpend.js').ManualAdEntry[] }>} manualAdByChannel
+ * @param {object} manualFilterCtx
+ */
+function buildManualAdKpiRows(manualAdByChannel, manualFilterCtx) {
   const rows = []
-  for (const def of MANUAL_AD_SOURCE_DEFS) {
-    const entries = bySource[def.value] || []
-    if (!entries.length) continue
-    const row = buildExternalAdRow(entries, manualFilterCtx, def.kpiLabel)
-    if ((row.ad?.adSpend || 0) > 0 || (row.ad?.adSales || 0) > 0) rows.push(row)
+  for (const group of manualAdByChannel || []) {
+    const brandLabel = group?.label || ''
+    const bySource = groupManualAdEntriesBySource(group?.entries || [])
+    for (const def of MANUAL_AD_SOURCE_DEFS) {
+      const entries = bySource[def.value] || []
+      if (!entries.length) continue
+      const label = formatExternalAdKpiLabel(brandLabel, def.kpiLabel)
+      const row = buildExternalAdRow(entries, manualFilterCtx, label)
+      if ((row.ad?.adSpend || 0) > 0 || (row.ad?.adSales || 0) > 0) rows.push(row)
+    }
   }
   return rows
 }
@@ -350,9 +361,7 @@ export function buildPlatformKpiSplitRows(sourceRecords, manualAdByChannel, manu
 
   const source = sourceRecords || []
 
-  const manualEntries = collectManualAdEntries(manualAdByChannel)
-
-  const manualAdRows = buildManualAdKpiRows(manualEntries, manualFilterCtx)
+  const manualAdRows = buildManualAdKpiRows(manualAdByChannel, manualFilterCtx)
 
 
 
@@ -628,9 +637,8 @@ export function buildCombinedKpiSplitRows(
   manualFilterCtx,
 ) {
   const source = allRecords || []
-  // 파워프라이스 포함 — 외부 광고는 Meta·GFA·AD·구글 행에서만 합산 (세그먼트 행과 이중 계산 방지)
-  const allManual = collectManualAdEntries(manualAdByChannel)
-  const manualAdRows = buildManualAdKpiRows(allManual, manualFilterCtx)
+  // 파워프라이스 포함 — 외부 광고는 브랜드×플랫폼 행에서만 합산 (세그먼트 행과 이중 계산 방지)
+  const manualAdRows = buildManualAdKpiRows(manualAdByChannel, manualFilterCtx)
 
   const segmentRows = []
 
@@ -1056,7 +1064,7 @@ export function isManualExpenseKpiNA(rowLabel, section, key, expense = null, row
     isManualExpenseSegmentKind(row) || isManualExpenseRowLabel(rowLabel, expense)
   if (!isExpense) return false
   if (section === 'profit') {
-    return ['sales', 'salesQty', 'aov', 'costRate', 'netProfitRate'].includes(key)
+    return ['sales', 'salesQty', 'aov', 'totalCost', 'costRate', 'netProfitRate'].includes(key)
   }
   if (section === 'ad') {
     return ['adSpend', 'adSales', 'organicSales', 'organicSalesRate', 'salesRoas', 'roas'].includes(

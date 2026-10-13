@@ -11,8 +11,9 @@ export function sha256Buffer(buffer) {
 /**
  * @param {string} sha256
  * @param {string} [uploadKind]
+ * @param {string[]} [excludeUploadIds] 이번 업로드로 교체될 배치 — 중복 판정에서 제외
  */
-export async function findDuplicateUpload(sha256, uploadKind = '') {
+export async function findDuplicateUpload(sha256, uploadKind = '', excludeUploadIds = []) {
   const pool = getPool()
   const params = [sha256]
   let sql = `
@@ -21,12 +22,26 @@ export async function findDuplicateUpload(sha256, uploadKind = '') {
     JOIN uploads u ON u.id = uf.upload_id
     WHERE uf.sha256 = $1`
   if (uploadKind) {
-    sql += ` AND u.upload_kind = $2`
     params.push(uploadKind)
+    sql += ` AND u.upload_kind = $${params.length}`
+  }
+  if (excludeUploadIds.length) {
+    params.push(excludeUploadIds)
+    sql += ` AND NOT (u.id = ANY($${params.length}::uuid[]))`
   }
   sql += ` ORDER BY u.created_at DESC LIMIT 1`
   const res = await pool.query(sql, params)
   return res.rows[0] || null
+}
+
+/** @returns {Promise<string[]>} */
+export async function findUploadIdsByFileName(fileName, uploadKind) {
+  const pool = getPool()
+  const res = await pool.query(
+    `SELECT id FROM uploads WHERE file_name = $1 AND upload_kind = $2`,
+    [fileName, uploadKind],
+  )
+  return res.rows.map((r) => r.id)
 }
 
 export async function deleteUploadsByFileName(fileName, uploadKind) {
@@ -52,11 +67,18 @@ export async function insertUploadBundle({
   sha256,
   storageDir,
   storagePath,
+  replaceUploadIds = [],
 }) {
   const pool = getPool()
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+
+    // 같은 파일명 재업로드: 새 데이터 INSERT와 같은 트랜잭션에서 교체 — 실패 시 기존 데이터 유지
+    if (replaceUploadIds.length) {
+      await client.query(`DELETE FROM sales_records WHERE upload_id = ANY($1::uuid[])`, [replaceUploadIds])
+      await client.query(`DELETE FROM uploads WHERE id = ANY($1::uuid[])`, [replaceUploadIds])
+    }
 
     const uploadSql = `
       INSERT INTO uploads (

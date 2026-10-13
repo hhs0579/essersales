@@ -2,7 +2,7 @@ import {
   isValidSettingScope,
   isValidSettingKind,
 } from '../constants/appSettings.js'
-import { getSetting, upsertSetting } from '../repositories/settingsRepository.js'
+import { getSetting, saveSettingWithHistory } from '../repositories/settingsRepository.js'
 import { OWN_MALL_MANUAL_SETTING_KIND } from '../../../src/config/ownMallManual.js'
 
 function assertScopeKind(scope, kind) {
@@ -98,14 +98,30 @@ export async function getAppSetting(scope, kind, opts = {}) {
  * @param {string} scope
  * @param {string} kind
  * @param {unknown} data
+ * @param {{ checkBase?: boolean, baseUpdatedAt?: string | null }} [opts]
+ *   checkBase=true 이면 서버 updated_at이 baseUpdatedAt과 다를 때 409 (다른 화면이 먼저 저장)
  */
-export async function putAppSetting(scope, kind, data) {
+export async function putAppSetting(scope, kind, data, opts = {}) {
   assertScopeKind(scope, kind)
-  let payload = data
-  if (kind === OWN_MALL_MANUAL_SETTING_KIND) {
-    const existing = await getSetting(scope, kind)
-    payload = mergeOwnMallManualPreserveSources(data, existing?.data ?? null)
+  const isOwnMall = kind === OWN_MALL_MANUAL_SETTING_KIND
+  const result = await saveSettingWithHistory(
+    scope,
+    kind,
+    (existingData) =>
+      isOwnMall ? mergeOwnMallManualPreserveSources(data, existingData) : data,
+    {
+      checkBase: Boolean(opts.checkBase),
+      baseUpdatedAt: opts.baseUpdatedAt ?? null,
+      needExistingData: isOwnMall,
+    },
+  )
+  if (result.conflict) {
+    const current = await getSetting(scope, kind, { omitSources: isOwnMall })
+    const err = new Error('다른 화면에서 먼저 저장된 내용이 있습니다.')
+    err.status = 409
+    err.code = 'SETTING_CONFLICT'
+    err.current = formatSettingResponse(current)
+    throw err
   }
-  const row = await upsertSetting(scope, kind, payload)
-  return formatSettingResponse(row)
+  return formatSettingResponse(result.row)
 }

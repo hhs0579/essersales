@@ -3,7 +3,7 @@ import { loadEnv } from '../config/env.js'
 import { parseExcelUpload } from './uploadParseService.js'
 import {
   findDuplicateUpload,
-  deleteUploadsByFileName,
+  findUploadIdsByFileName,
   insertUploadBundle,
   sha256Buffer,
 } from '../repositories/uploadInsertRepository.js'
@@ -30,16 +30,15 @@ export async function processExcelUpload({ buffer, fileName, fields }) {
   )
 
   const sha256 = sha256Buffer(buffer)
-  const isClosedMall =
-    uploadKind === 'bestheim_closed_mall' || uploadKind === 'esser_closed_mall'
 
-  // 폐쇄몰: 파일명 교체 후 지문 조회가 맞도록 파싱 전에 동일 파일명 삭제
-  if (isClosedMall && replaceSameName) {
-    await deleteUploadsByFileName(fileName, uploadKind)
-  }
+  // 동일 파일명 배치는 새 데이터 INSERT 트랜잭션 안에서 교체 (파싱 실패 시 기존 데이터 보존)
+  const replaceUploadIds =
+    replaceSameName && uploadKind !== 'sales_report'
+      ? await findUploadIdsByFileName(fileName, uploadKind)
+      : []
 
   if (!force) {
-    const dup = await findDuplicateUpload(sha256, uploadKind)
+    const dup = await findDuplicateUpload(sha256, uploadKind, replaceUploadIds)
     if (dup) {
       return {
         ok: false,
@@ -67,10 +66,6 @@ export async function processExcelUpload({ buffer, fileName, fields }) {
     throw e
   }
 
-  if (replaceSameName && uploadKind !== 'sales_report' && !isClosedMall) {
-    await deleteUploadsByFileName(fileName, uploadKind)
-  }
-
   const env = loadEnv()
   const storageDir = join(env.uploadDir, bundle.upload.id)
   const storagePath = join(storageDir, fileName)
@@ -83,6 +78,7 @@ export async function processExcelUpload({ buffer, fileName, fields }) {
     sha256,
     storageDir,
     storagePath,
+    replaceUploadIds,
   })
 
   return {
@@ -94,5 +90,6 @@ export async function processExcelUpload({ buffer, fileName, fields }) {
     salesMethod: bundle.upload.sales_method,
     parseMeta: bundle.parseMeta,
     duplicate: false,
+    replacedUploads: replaceUploadIds.length,
   }
 }

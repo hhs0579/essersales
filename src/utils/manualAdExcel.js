@@ -25,7 +25,7 @@ export function buildManualAdExcelBlock(entries, opts = {}) {
   const filterCtx = opts.filterCtx || {}
   const monthly = opts.period === 'monthly' || filterCtx.period === 'monthly'
   const channelLabel = opts.channelLabel || ''
-  const titlePrefix = channelLabel ? `${channelLabel} · ` : ''
+  const titlePrefix = channelLabel ? `${channelLabel}-` : ''
   const sectionTitle =
     opts.sectionTitle ||
     (monthly
@@ -65,8 +65,8 @@ export function buildManualAdExcelBlocksByChannel(channelGroups, opts = {}) {
           ...opts,
           channelLabel: label,
           sectionTitle: monthly
-            ? `■ ${label ? `${label} · ` : ''}${def.kpiLabel} (월별)`
-            : `■ ${label ? `${label} · ` : ''}${def.kpiLabel} (일별)`,
+            ? `■ ${label ? `${label}-` : ''}${def.kpiLabel} (월별)`
+            : `■ ${label ? `${label}-` : ''}${def.kpiLabel} (일별)`,
         }),
       )
     }

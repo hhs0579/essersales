@@ -12,7 +12,6 @@ import {
   getModeByScope,
   isManualOnlyChannel,
   COMBINED_CHANNEL_ID,
-  isCombinedCommentsChannel,
 } from '../../config/dataChannels.js'
 
 import { useSalesData } from '../../composables/useSalesData.js'
@@ -102,11 +101,7 @@ const dashboardChannels = getDashboardChannels()
 watch(
   () => activeChannelId.value,
   (id) => {
-    if (id === 'channel_d') {
-      activeChannelId.value = COMBINED_CHANNEL_ID
-      return
-    }
-    if (isCombinedCommentsChannel(id)) {
+    if (id === 'channel_d' || id === 'channel_combined_comments') {
       activeChannelId.value = COMBINED_CHANNEL_ID
     }
   },
@@ -146,6 +141,10 @@ function scopeFor(channelId, modeId = activeDashboardMode.value) {
 function dashboardModesFor(ch) {
 
   if (ch.manualOnly) return ch.modes
+
+  if (ch.id === COMBINED_CHANNEL_ID) {
+    return ch.modes.filter((m) => m.id === 'daily' || m.id === 'weekly' || m.id === 'monthly')
+  }
 
   return ch.modes.filter((m) => m.id === 'daily' || m.id === 'monthly')
 
@@ -210,13 +209,25 @@ function dashboardModesFor(ch) {
           :class="{ active: activeDashboardMode === mode.id }"
           @click="setDashboardMode(mode.id)"
         >
-          {{ mode.id === 'monthly' ? '월별 매출' : '일별 매출' }}
+          {{
+            mode.id === 'monthly'
+              ? '월별 매출'
+              : mode.id === 'weekly'
+                ? '주간 매출'
+                : '일별 매출'
+          }}
         </button>
       </nav>
 
       <header class="channel-head">
         <h3 class="channel-title">
-          {{ activeDashboardMode === 'monthly' ? '월별 매출' : activeChannel.reportTitle }}
+          {{
+            activeDashboardMode === 'monthly'
+              ? '월별 매출'
+              : activeDashboardMode === 'weekly'
+                ? '주간 매출'
+                : activeChannel.reportTitle
+          }}
         </h3>
         <span class="channel-badge">{{ activeChannel.tabLabel }}</span>
       </header>
@@ -225,6 +236,7 @@ function dashboardModesFor(ch) {
         <SalesDataView
           :key="`${activeChannel.id}-${activeDashboardMode}`"
           :scope="scopeFor(activeChannel.id)"
+          :report-mode="activeDashboardMode"
         />
       </KeepAlive>
     </div>

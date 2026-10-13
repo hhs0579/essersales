@@ -10,7 +10,6 @@ export const ALLOWED_SETTING_SCOPES = new Set([
   'sales_report',
   'combined_daily',
   'combined_monthly',
-  'combined_comments',
   '__test__',
 ])
 
@@ -23,7 +22,7 @@ export const ALLOWED_SETTING_KINDS = new Set([
   'own_mall_manual',
   'special_sale',
   'manual_expense',
-  'combined_comments',
+  'week_periods',
   'settings_write_regression',
 ])
 

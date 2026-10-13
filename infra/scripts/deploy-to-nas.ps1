@@ -166,6 +166,9 @@ try {
     @{ Src = "src\services\adapters"; Dst = "src\services\adapters" },
     @{ Src = "backend"; Dst = "backend" },
     @{ Src = "infra\db"; Dst = "infra\db" },
+    @{ Src = "infra\nginx"; Dst = "infra\nginx" },
+    @{ Src = "infra\scripts\nas-daily-backup.sh"; Dst = "infra\scripts\nas-daily-backup.sh" },
+    @{ Src = "infra\scripts\restore-nas-from-backup.sh"; Dst = "infra\scripts\restore-nas-from-backup.sh" },
     @{ Src = "docker-compose.nas.yml"; Dst = "docker-compose.nas.yml" }
   )
 
@@ -226,7 +229,18 @@ Write-Host "[3/3] NAS Docker restart (SSH)..." -ForegroundColor Yellow
 Write-Host "  'Could not chdir to home directory' on Synology SSH is harmless." -ForegroundColor DarkGray
 Write-Host "  api/proxy restart only (source mounted) - usually under 1 minute." -ForegroundColor DarkGray
 $sshTarget = $sshUser + "@" + $NasHost
-$remoteInner = "export PATH=`$PATH:/usr/local/bin:/usr/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin; cd /volume1/docker/essersales && docker compose -f docker-compose.nas.yml up -d --force-recreate api proxy && docker compose -f docker-compose.nas.yml ps"
+$remoteInner = @(
+  "export PATH=`$PATH:/usr/local/bin:/usr/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin"
+  "cd /volume1/docker/essersales || exit 7"
+  "sed -i 's/\r`$//' infra/scripts/*.sh"
+  "echo '[deploy] pre-deploy DB dump'"
+  "BACKUP_PREFIX=predeploy bash infra/scripts/nas-daily-backup.sh || { echo '[deploy] backup FAILED - abort'; exit 9; }"
+  "docker compose -f docker-compose.nas.yml up -d --force-recreate api proxy"
+  "ok=; for i in `$(seq 1 40); do if curl -fsS http://127.0.0.1:`${HTTP_PORT:-8080}/api/v1/health >/dev/null 2>&1; then ok=1; break; fi; sleep 3; done"
+  "docker compose -f docker-compose.nas.yml ps"
+  "if [ -z `$ok ]; then echo '[deploy] health check FAILED'; docker compose -f docker-compose.nas.yml logs --tail 60 api; exit 8; fi"
+  "echo '[deploy] health OK'"
+) -join "; "
 $remoteCmd = "printf '%s\n' " + "'" + ($plainPass -replace "'", "'\''") + "'" + " | sudo -S -p '' bash -lc " + "'" + $remoteInner.Replace("'", "'\''") + "'"
 
 $env:NAS_SSH_PASS = $plainPass

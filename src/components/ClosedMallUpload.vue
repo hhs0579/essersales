@@ -8,11 +8,7 @@ import {
   getClosedMallBrand,
 } from '../config/closedMall.js'
 import { readClosedMallFile } from '../utils/bestheimClosedMallParser.js'
-import {
-  deleteUploadAndRecords,
-  fetchUploads,
-  savePlatformDailyUpload,
-} from '../services/salesApi.js'
+import { savePlatformDailyUpload } from '../services/salesApi.js'
 import VirtualScrollTableBody from './VirtualScrollTableBody.vue'
 
 const props = defineProps({
@@ -147,14 +143,7 @@ async function confirmUpload() {
   const def = brandDef.value
   try {
     const fileName = pendingFile.value.name
-    const uploads = await fetchUploads()
-    const sameName = uploads.filter(
-      (u) => u.fileName === fileName && u.uploadKind === def.uploadKind,
-    )
-    for (const u of sameName) {
-      await deleteUploadAndRecords(u.id)
-    }
-
+    // 같은 파일명 기존 배치는 서버가 저장 트랜잭션 안에서 교체 (실패 시 기존 데이터 유지)
     const result = await savePlatformDailyUpload({
       file: pendingFile.value,
       fileName,

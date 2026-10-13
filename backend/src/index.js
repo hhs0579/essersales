@@ -47,3 +47,12 @@ async function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
+
+// Node 20은 처리되지 않은 rejection에서 프로세스를 종료함 — 로그만 남기고 API는 유지
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason?.stack || reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[process] uncaughtException:', err?.stack || err)
+  process.exit(1)
+})

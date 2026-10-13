@@ -17,13 +17,15 @@ import {
   applyKpiDetailFilters,
   filtersForDayOverDayLookup,
   resolveRecordDateForAggregation,
+  isFilterFullCalendarMonth,
 } from '../../../src/utils/recordFilters.js'
 import { enrichExportRecords } from '../../../src/utils/combinedExportRecords.js'
 import { resolveOwnMallStoreForKpi } from '../../../src/utils/ownMallRecords.js'
 import { buildSpecialSaleMonthlyTotals, addMonthsToMonthKey } from '../../../src/utils/dayOverDaySales.js'
-import { pickSpecialSaleSettingForMonth, mergeSpecialSaleSettingRaw } from '../../../src/utils/specialSaleKpi.js'
+import { pickSpecialSaleSettingForMonth, pickSpecialSaleSettingForWeek, mergeSpecialSaleSettingRaw } from '../../../src/utils/specialSaleKpi.js'
 import {
   pickManualExpenseSettingForMonth,
+  pickManualExpenseSettingForWeek,
   mergeManualExpenseSettingRaw,
 } from '../../../src/utils/manualExpenseKpi.js'
 import { buildKpiSplitRowsForChannel } from '../../../src/utils/platformKpiSplit.js'
@@ -146,8 +148,9 @@ function parseSettingOverride(raw) {
 function specialSaleMonthlyTotalsFromRaw(raw, monthKey = '') {
   if (!raw || typeof raw !== 'object') return null
   const o = /** @type {Record<string, unknown>} */ (raw)
+  /** @type {Record<string, unknown[]>} */
+  const flat = {}
   if (o.months && typeof o.months === 'object') {
-    const flat = {}
     for (const [mk, bucket] of Object.entries(
       /** @type {Record<string, unknown>} */ (o.months),
     )) {
@@ -159,14 +162,32 @@ function specialSaleMonthlyTotalsFromRaw(raw, monthKey = '') {
           : Array.isArray(bucket)
             ? bucket
             : []
-      flat[mk] = entries
+      flat[mk] = [...entries]
     }
-    return buildSpecialSaleMonthlyTotals(flat)
+  } else if (Array.isArray(o.entries) && monthKey) {
+    flat[monthKey] = [...o.entries]
   }
-  if (Array.isArray(o.entries) && monthKey) {
-    return buildSpecialSaleMonthlyTotals({ [monthKey]: o.entries })
+  if (o.weeks && typeof o.weeks === 'object') {
+    for (const [wk, bucket] of Object.entries(
+      /** @type {Record<string, unknown>} */ (o.weeks),
+    )) {
+      const m = String(wk).match(/^(\d{4}-\d{2})-W[1-6]$/)
+      if (!m) continue
+      const mk = m[1]
+      const entries =
+        bucket && typeof bucket === 'object' && Array.isArray(
+          /** @type {{ entries?: unknown[] }} */ (bucket).entries,
+        )
+          ? /** @type {{ entries: unknown[] }} */ (bucket).entries
+          : Array.isArray(bucket)
+            ? bucket
+            : []
+      if (!flat[mk]) flat[mk] = []
+      flat[mk].push(...entries)
+    }
   }
-  return null
+  if (!Object.keys(flat).length) return null
+  return buildSpecialSaleMonthlyTotals(flat)
 }
 
 function resolveExportMonthKey(filterObj) {
@@ -359,37 +380,50 @@ export async function loadExportPayload(query = {}) {
     )
   }
 
-  // 특판 수기는 월별 통합 엑셀에만 포함. 기간(일별) 다운로드에는 넣지 않음.
+  // 특판·수기 지출: 월별 통합 → months / 주간 통합 → weeks[Wn] (서로 비중복)
+  const weekKey = String(query.fri_thu_week_key || query.friThuWeekKey || '').trim()
+  const includeWeeklyExtras =
+    combined && !isMonthlyScope(scope) && /^\d{4}-\d{2}-W[1-6]$/.test(weekKey)
   const includeMonthlyExtras = combined && isMonthlyScope(scope)
   const exportMonthKey = resolveExportMonthKey(filterObj)
-  const specialSaleOverride = includeMonthlyExtras
-    ? parseSettingOverride(query.special_sale)
-    : null
-  const specialSaleDb = includeMonthlyExtras
-    ? await getSettingData(specialSaleScopeFor(scope), 'special_sale')
-    : null
-  const specialSaleRaw = includeMonthlyExtras
-    ? mergeSpecialSaleSettingRaw(specialSaleDb, specialSaleOverride, exportMonthKey)
-    : null
+  const specialSaleOverride =
+    includeMonthlyExtras || includeWeeklyExtras ? parseSettingOverride(query.special_sale) : null
+  const specialSaleDb =
+    includeMonthlyExtras || includeWeeklyExtras
+      ? await getSettingData(specialSaleScopeFor(scope), 'special_sale')
+      : null
+  const specialSaleRaw =
+    includeMonthlyExtras || includeWeeklyExtras
+      ? mergeSpecialSaleSettingRaw(specialSaleDb, specialSaleOverride, exportMonthKey)
+      : null
+  const rangeOpts = {
+    dateFrom: filterObj.dateFrom,
+    dateTo: filterObj.dateTo,
+  }
   const specialSale = includeMonthlyExtras
-    ? pickSpecialSaleSettingForMonth(specialSaleRaw, exportMonthKey)
-    : null
-  const specialSaleByMonth = includeMonthlyExtras
+    ? pickSpecialSaleSettingForMonth(specialSaleRaw, exportMonthKey, rangeOpts)
+    : includeWeeklyExtras
+      ? pickSpecialSaleSettingForWeek(specialSaleRaw, weekKey)
+      : null
+  const specialSaleByMonth = includeMonthlyExtras && isFilterFullCalendarMonth(filterObj)
     ? specialSaleMonthlyTotalsFromRaw(specialSaleRaw, exportMonthKey)
     : null
 
-  const expenseOverride = includeMonthlyExtras
-    ? parseSettingOverride(query.manual_expense)
-    : null
-  const expenseDb = includeMonthlyExtras
-    ? await getSettingData(specialSaleScopeFor(scope), 'manual_expense')
-    : null
-  const expenseRaw = includeMonthlyExtras
-    ? mergeManualExpenseSettingRaw(expenseDb, expenseOverride, exportMonthKey)
-    : null
+  const expenseOverride =
+    includeMonthlyExtras || includeWeeklyExtras ? parseSettingOverride(query.manual_expense) : null
+  const expenseDb =
+    includeMonthlyExtras || includeWeeklyExtras
+      ? await getSettingData(specialSaleScopeFor(scope), 'manual_expense')
+      : null
+  const expenseRaw =
+    includeMonthlyExtras || includeWeeklyExtras
+      ? mergeManualExpenseSettingRaw(expenseDb, expenseOverride, exportMonthKey)
+      : null
   const manualExpense = includeMonthlyExtras
-    ? pickManualExpenseSettingForMonth(expenseRaw, exportMonthKey)
-    : null
+    ? pickManualExpenseSettingForMonth(expenseRaw, exportMonthKey, rangeOpts)
+    : includeWeeklyExtras
+      ? pickManualExpenseSettingForWeek(expenseRaw, weekKey)
+      : null
 
   const channelManualAd =
     manualAdByChannel || [
@@ -409,7 +443,6 @@ export async function loadExportPayload(query = {}) {
         )
       : []
 
-  const combinedComments = null
   const profitLossTemplate = combined
     ? await getSettingData(PROFIT_LOSS_TEMPLATE_SCOPE, PROFIT_LOSS_TEMPLATE_KIND)
     : null
@@ -431,7 +464,6 @@ export async function loadExportPayload(query = {}) {
     specialSale,
     specialSaleByMonth,
     manualExpense,
-    combinedComments,
     hiddenKpiKeys,
     profitLossTemplate,
     uploads: [],

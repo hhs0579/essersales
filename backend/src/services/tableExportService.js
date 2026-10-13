@@ -15,6 +15,7 @@ import {
 } from '../../../src/config/dataChannels.js'
 import { buildTableWorkbook } from '../../../src/utils/dashboardExporter.js'
 import { applyKoreanFontToWorkbook } from '../../../src/utils/excelWorkbookStyle.js'
+import { acquireExportSlot, throwIfClientGone } from './exportGate.js'
 
 function memSnap() {
   const m = process.memoryUsage()
@@ -26,8 +27,19 @@ function memSnap() {
 
 /**
  * 표 엑셀 — 개선 전 Vue downloadTableExcel 과 동일한 행·컬럼·정렬
+ * @param {Record<string, unknown>} query
+ * @param {{ isAborted?: () => boolean }} [opts]
  */
-export async function buildTableExport(query = {}) {
+export async function buildTableExport(query = {}, opts = {}) {
+  const release = acquireExportSlot('table')
+  try {
+    return await buildTableExportLocked(query, opts)
+  } finally {
+    release()
+  }
+}
+
+async function buildTableExportLocked(query, opts) {
   const profile = {
     memStart: memSnap(),
     ms: {},
@@ -55,6 +67,7 @@ export async function buildTableExport(query = {}) {
     err.code = 'NO_DATA'
     throw err
   }
+  throwIfClientGone(opts.isAborted)
 
   const tCols = performance.now()
   let columns
@@ -84,6 +97,7 @@ export async function buildTableExport(query = {}) {
   const tFont = performance.now()
   applyKoreanFontToWorkbook(wb)
   profile.ms.koreanFont = Math.round(performance.now() - tFont)
+  throwIfClientGone(opts.isAborted)
 
   const exportDir = process.env.EXPORT_DIR || './exports'
   if (!fs.existsSync(exportDir)) {

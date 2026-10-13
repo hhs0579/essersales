@@ -38,7 +38,8 @@ export function createApp(env) {
     next()
   })
 
-  app.use(express.json({ limit: '1mb' }))
+  // 자사몰 own_mall_manual 등 settings PUT에 엑셀 base64가 포함됨 (nginx client_max_body_size 50m와 맞춤)
+  app.use(express.json({ limit: '50mb' }))
 
 
 

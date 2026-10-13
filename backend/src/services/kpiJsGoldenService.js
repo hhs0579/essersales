@@ -22,7 +22,8 @@ import {
   mergePlatformWithManual,
   mergeCompareYesterdayWithManual,
 } from '../utils/manualAdKpiMerge.js'
-import { loadManualAdEntriesForScope } from './manualAdLoadService.js'
+import { loadManualAdEntriesForScope, loadManualAdChannelGroups } from './manualAdLoadService.js'
+import { findExternalAdChannelByScope } from '../../../src/config/externalAdChannels.js'
 import {
   applyRecordFilters,
   applyKpiDetailFilters,
@@ -123,7 +124,8 @@ async function applyManualMerge(base, filters, merger) {
     return base
   }
   const filterCtx = filterCtxFromKpiFilters(filters)
-  return merger(base, manualEntries, filterCtx)
+  const brandLabel = findExternalAdChannelByScope(filters.scope)?.label || ''
+  return merger(base, manualEntries, filterCtx, { brandLabel })
 }
 
 async function getSettingData(scope, kind) {
@@ -337,8 +339,9 @@ export async function getKpiBySegmentJs(query) {
         resolveSegmentMonthKey(filters),
       )
     : null
-  const manualEntries = await maybeLoadManualAds(filters)
-  const channelGroups = manualEntries.length ? [{ label: '통합', entries: manualEntries }] : []
+  const channelGroups = filters.includeManualAds
+    ? await loadManualAdChannelGroups(filters.scope)
+    : []
   const t1 = performance.now()
   const { items, totalRow } = aggregateCombinedSegmentKpiFromRecords(
     records,

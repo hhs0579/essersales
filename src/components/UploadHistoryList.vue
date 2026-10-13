@@ -5,6 +5,7 @@ import { computed, ref, watch } from 'vue'
 import { uploadSalesMethod } from '../composables/useSalesData.js'
 import { channelLabelForUploadKind } from '../config/dataChannels.js'
 import { resolveUploadPlatform } from '../utils/platformDetect.js'
+import { downloadUploadOriginal } from '../services/salesApi.js'
 
 function displayPlatform(u) {
   return resolveUploadPlatform(u.fileName, u.platform) || u.platform
@@ -47,6 +48,8 @@ const emit = defineEmits([
 
 
 const currentPage = ref(1)
+const downloadingId = ref('')
+const downloadErr = ref('')
 
 
 
@@ -116,6 +119,19 @@ function goNext() {
 
 }
 
+async function onDownloadOriginal(u) {
+  if (!u?.id || downloadingId.value) return
+  downloadErr.value = ''
+  downloadingId.value = u.id
+  try {
+    await downloadUploadOriginal(u.id)
+  } catch (e) {
+    downloadErr.value = e?.message || '원본 다운로드에 실패했습니다.'
+  } finally {
+    downloadingId.value = ''
+  }
+}
+
 </script>
 
 
@@ -138,19 +154,21 @@ function goNext() {
 
         class="btn btn-primary btn-sm"
 
-        :disabled="selectedUploadIds.length < 2"
+        :disabled="selectedUploadIds.length < 1"
 
         @click="emit('merge-download')"
 
       >
 
-        통합 엑셀 다운로드 ({{ selectedUploadIds.length }}개)
+        엑셀 다운로드 ({{ selectedUploadIds.length }}개)
 
       </button>
 
       <span v-if="showPagination" class="page-meta">{{ pageRangeLabel }}</span>
 
     </div>
+
+    <p v-if="downloadErr" class="download-fail">{{ downloadErr }}</p>
 
     <ul class="file-list">
 
@@ -194,6 +212,16 @@ function goNext() {
         <span class="tag tag-ok">상세 {{ u.detailCount }}건</span>
 
         <span class="tag">총 {{ u.totalCount }}건</span>
+
+        <button
+          type="button"
+          class="btn btn-outline btn-sm"
+          :disabled="saving || downloadingId === u.id"
+          title="서버에 저장된 업로드 원본 엑셀"
+          @click="onDownloadOriginal(u)"
+        >
+          {{ downloadingId === u.id ? '받는 중…' : '원본 받기' }}
+        </button>
 
         <button
 
@@ -387,6 +415,12 @@ function goNext() {
 
   color: var(--danger);
 
+}
+
+.download-fail {
+  margin: 0 0 10px;
+  font-size: 0.85rem;
+  color: var(--danger);
 }
 
 

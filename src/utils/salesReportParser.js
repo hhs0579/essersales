@@ -257,7 +257,7 @@ export async function readSalesReportBuffer(buffer, fileName) {
       : buffer instanceof ArrayBuffer
         ? new Uint8Array(buffer)
         : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
-  const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+  const workbook = XLSX.read(data, { type: 'array', cellDates: true, dateNF: 'yyyy-mm-dd' })
   const sheetName = workbook.SheetNames[0]
   const sheet = workbook.Sheets[sheetName]
   const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false })

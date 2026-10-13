@@ -155,7 +155,8 @@ export async function readExcelBuffer(buffer, fileName) {
         : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
 
   const lower = String(fileName || '').toLowerCase()
-  const readOpts = { type: 'array', cellDates: true }
+  // dateNF: 엑셀 기본 짧은 날짜(서식 14)가 raw:false 문자열에서 "9/21/26"로 나와 날짜 인식 실패하는 것 방지
+  const readOpts = { type: 'array', cellDates: true, dateNF: 'yyyy-mm-dd' }
   if (lower.endsWith('.xls') && !lower.endsWith('.xlsx')) {
     readOpts.codepage = 949
   }

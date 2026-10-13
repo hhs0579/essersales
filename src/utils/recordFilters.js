@@ -54,7 +54,8 @@ function normalizeDateYmd(val) {
     return p ? formatYmd(p.year, p.month, p.day) : ''
   }
   if (val instanceof Date && !Number.isNaN(val.getTime())) {
-    return formatYmd(val.getFullYear(), val.getMonth() + 1, val.getDate())
+    const p = parseSalesDate(val)
+    return p ? formatYmd(p.year, p.month, p.day) : ''
   }
   const p = parseSalesDate(String(val))
   return p ? formatYmd(p.year, p.month, p.day) : ''
@@ -85,12 +86,15 @@ function getRecordYmdBounds(row) {
     if (!ymd) return null
     return { from: ymd, to: ymd }
   }
+  // 월별 업로드도 일자(order_date 등)가 있으면 그날만 — period 태그로 부분 기간에 월 전체가 잡히지 않게
+  const dayYmd = resolveKpiCompatYmd(r)
+  if (dayYmd) return { from: dayYmd, to: dayYmd }
   if (r.periodFrom && r.periodTo) {
-    return { from: r.periodFrom, to: r.periodTo }
+    const from = normalizeDateYmd(r.periodFrom)
+    const to = normalizeDateYmd(r.periodTo)
+    if (from && to) return { from, to }
   }
-  const ymd = resolveKpiCompatYmd(r)
-  if (!ymd) return null
-  return { from: ymd, to: ymd }
+  return null
 }
 
 /** 연·월·요일·날짜범위 등 기간 조건이 켜져 있는지 */
@@ -108,6 +112,30 @@ export function hasActivePeriodFilter(filters = {}) {
  */
 export function excludeEsserSheetTotalsForPeriodKpi(records, filters) {
   return applyKpiDetailFilters(records, filters)
+}
+
+/** 조회 기간이 해당 달 1일~말일 전체인지 */
+export function isFilterFullCalendarMonth(filters = {}) {
+  const from = String(filters.dateFrom || '').trim()
+  const to = String(filters.dateTo || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return false
+  if (from.slice(0, 7) !== to.slice(0, 7)) return false
+  const y = Number(from.slice(0, 4))
+  const m = Number(from.slice(5, 7))
+  const last = new Date(y, m, 0).getDate()
+  return from.endsWith('-01') && to === `${from.slice(0, 7)}-${String(last).padStart(2, '0')}`
+}
+
+/** 행의 period 구간이 조회 기간보다 넓은지 (월 전체 합계 행 등) */
+function periodSpanWiderThanFilter(row, dateFrom, dateTo) {
+  const r = normalizeRecord(row)
+  const pf = normalizeDateYmd(r.periodFrom)
+  const pt = normalizeDateYmd(r.periodTo)
+  if (!pf || !pt || pf === pt) return false
+  const from = String(dateFrom || '').trim()
+  const to = String(dateTo || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return false
+  return pf < from || pt > to
 }
 
 /**
@@ -135,6 +163,8 @@ export function applyKpiDetailFilters(records, filters = {}) {
   }
 
   const keptSheets = sheetRows.filter((r) => {
+    // 부분 기간인데 합계 행 period가 월 전체면 제외 → 상품 행 합만 써서 기간 값 유지
+    if (periodSpanWiderThanFilter(r, filters.dateFrom, filters.dateTo)) return false
     if (matchDateRangeFilter(r, filters.dateFrom, filters.dateTo)) return true
     const key = r.uploadId || r.sourceFileName || ''
     return Boolean(key && uploadKeys.has(key))

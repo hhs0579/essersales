@@ -51,7 +51,11 @@ export async function pgRequest(path, options = {}) {
       typeof body.error === 'string'
         ? body.error
         : body.error?.message || `PG API 요청 실패 (${res.status})`
-    throw new Error(errMsg)
+    const err = new Error(errMsg)
+    err.status = res.status
+    err.code = body.code || body.error?.code || ''
+    err.body = body
+    throw err
   }
   return body
 }
@@ -256,31 +260,79 @@ export async function pgDownloadTableExport(params = {}) {
 /**
  * @param {string} scope
  * @param {string} kind
- * @param {{ omitSources?: boolean }} [opts]
+ * @param {{ omitSources?: boolean, trackBase?: boolean }} [opts]
  */
 export async function pgFetchAppSetting(scope, kind, opts = {}) {
   const qs = new URLSearchParams({ scope, kind })
   if (opts.omitSources) qs.set('omit_sources', '1')
   const body = await pgRequest(`/settings?${qs}`)
-  return adaptPgSettingResponse(body.items)
+  const result = adaptPgSettingResponse(body.items)
+  // trackBase:false — 화면 상태에 반영하지 않는 보조 조회(원본 base64 보강 등)는 기준 버전을 바꾸지 않음
+  if (opts.trackBase !== false) rememberSettingBase(scope, kind, result)
+  return result
 }
 
 export async function pgFetchAppSettingByPath(scope, kind) {
   const body = await pgRequest(
     `/settings/${encodeURIComponent(scope)}/${encodeURIComponent(kind)}`,
   )
-  return adaptPgSettingPutResponse(body)
+  const result = adaptPgSettingPutResponse(body)
+  rememberSettingBase(scope, kind, result)
+  return result
 }
 
+/**
+ * 마지막으로 서버에서 받은 설정 버전 — PUT 시 baseUpdatedAt으로 보내 동시 저장 덮어쓰기 감지
+ * @type {Map<string, { updatedAt: string | null, data: unknown }>}
+ */
+const settingBaseByKey = new Map()
+
+function settingKey(scope, kind) {
+  return `${scope}\u0000${kind}`
+}
+
+function cloneJson(v) {
+  return v === undefined ? null : JSON.parse(JSON.stringify(v))
+}
+
+function rememberSettingBase(scope, kind, result) {
+  settingBaseByKey.set(settingKey(scope, kind), {
+    updatedAt: result?.updatedAt ?? null,
+    data: cloneJson(result?.data ?? null),
+  })
+}
+
+const MAX_SETTING_CONFLICT_RETRIES = 3
+
+/**
+ * 서버 값이 마지막 조회 이후 바뀌었으면(409) 3-way 병합 후 재저장.
+ * 조회 이력이 없으면 base=null로 보내 서버에 기존 데이터가 있을 때 덮어쓰지 않고 병합.
+ */
 export async function pgPutAppSetting(scope, kind, data) {
-  const body = await pgRequest(
-    `/settings/${encodeURIComponent(scope)}/${encodeURIComponent(kind)}`,
-    {
-      method: 'PUT',
-      body: JSON.stringify({ data }),
-    },
-  )
-  return adaptPgSettingPutResponse(body)
+  const key = settingKey(scope, kind)
+  let payload = data
+  for (let attempt = 0; ; attempt += 1) {
+    const base = settingBaseByKey.get(key)
+    try {
+      const body = await pgRequest(
+        `/settings/${encodeURIComponent(scope)}/${encodeURIComponent(kind)}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ data: payload, baseUpdatedAt: base?.updatedAt ?? null }),
+        },
+      )
+      const result = adaptPgSettingPutResponse(body)
+      rememberSettingBase(scope, kind, result)
+      return result
+    } catch (err) {
+      if (err?.status !== 409 || attempt >= MAX_SETTING_CONFLICT_RETRIES) throw err
+      const current = err.body?.current || {}
+      const { mergeSettingData } = await import('../utils/settingsMerge.js')
+      payload = mergeSettingData(base?.data ?? null, payload, current.data ?? null)
+      rememberSettingBase(scope, kind, { updatedAt: current.updatedAt ?? null, data: current.data })
+      console.warn(`[settings] ${scope}/${kind} 동시 저장 감지 — 서버 최신값과 병합 후 재저장`)
+    }
+  }
 }
 
 function kpiQuerySuffix(filters = {}) {
@@ -354,6 +406,36 @@ export async function pgDeleteUpload(uploadId) {
     method: 'DELETE',
   })
   return body
+}
+
+/**
+ * 업로드 원본 엑셀 재다운로드
+ * @param {string} uploadId
+ * @returns {Promise<{ blob: Blob, fileName: string }>}
+ */
+export async function pgDownloadUploadOriginal(uploadId) {
+  const PG_BASE = getPgApiBase()
+  let res
+  try {
+    res = await fetch(`${PG_BASE}/uploads/${encodeURIComponent(uploadId)}/file`, {
+      method: 'GET',
+    })
+  } catch {
+    throw new Error('원본 엑셀 API에 연결할 수 없습니다.')
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    const msg =
+      typeof body.error === 'string'
+        ? body.error
+        : body.error?.message || body.message || `원본 다운로드 실패 (${res.status})`
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition') || ''
+  const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i)
+  const fileName = decodeURIComponent(m?.[1] || m?.[2] || 'upload.xlsx')
+  return { blob, fileName }
 }
 
 /**

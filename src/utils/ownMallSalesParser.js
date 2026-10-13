@@ -1,6 +1,6 @@
 import { loadXlsx } from './lazyXlsx.js'
 import { parseAmount } from './parseAmount.js'
-import { parseSalesDate } from './dateParse.js'
+import { parseSalesDate, excelDateToYmd } from './dateParse.js'
 import { formatYmd } from './recordFilters.js'
 import { createOwnMallSaleEntry } from '../config/ownMallManual.js'
 
@@ -26,7 +26,7 @@ export const OWN_MALL_SALES_COL = {
 function cellStr(v) {
   if (v == null) return ''
   if (v instanceof Date && !isNaN(v.getTime())) {
-    return formatYmd(v.getFullYear(), v.getMonth() + 1, v.getDate())
+    return excelDateToYmd(v)
   }
   return String(v).trim()
 }
@@ -42,7 +42,7 @@ function normalizeKey(s) {
 
 function parseOrderDateYmd(v) {
   if (v instanceof Date && !isNaN(v.getTime())) {
-    return formatYmd(v.getFullYear(), v.getMonth() + 1, v.getDate())
+    return excelDateToYmd(v)
   }
   const parsed = parseSalesDate(v)
   if (!parsed) return ''

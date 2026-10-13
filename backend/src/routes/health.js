@@ -37,6 +37,5 @@ healthRouter.get('/health', async (_req, res) => {
     return res.status(503).json(payload)
   }
 
-  console.log('[health] Database connection OK, migrationVersion=', db.migrationVersion)
   res.json(payload)
 })

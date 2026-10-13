@@ -1,35 +1,70 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { useSpecialSale, currentMonthKey } from '../composables/useSpecialSale.js'
-import { formatManualAdAmount, formatSignedManualAdAmount } from '../utils/parseAmount.js'
+import {
+  useSpecialSale,
+  useSpecialSaleWeek,
+  currentMonthKey,
+} from '../composables/useSpecialSale.js'
 import {
   computeSpecialSaleMarginRate,
   normalizeSpecialSaleEntry,
 } from '../utils/specialSaleKpi.js'
+import { formatFriThuWeekTabLabel, parseFriThuWeekKey } from '../utils/friThuWeeks.js'
 
 const props = defineProps({
   scope: { type: String, required: true },
-  /** 조회 조건과 동일한 기준월 (YYYY-MM) */
   monthKey: { type: String, default: '' },
+  weekKey: { type: String, default: '' },
+  weekFrom: { type: String, default: '' },
+  weekTo: { type: String, default: '' },
 })
 
 const emit = defineEmits(['saved'])
+
+const isWeekMode = computed(() => /^\d{4}-\d{2}-W[1-6]$/.test(String(props.weekKey || '').trim()))
 
 const effectiveMonth = computed(() => {
   const mk = String(props.monthKey || '').trim()
   return /^\d{4}-\d{2}$/.test(mk) ? mk : currentMonthKey()
 })
 
-const { currentEntries, addEntry, removeEntry, saveSale, resetSale } = useSpecialSale(
-  props.scope,
-  effectiveMonth,
-)
+const weekKeyRef = computed(() => String(props.weekKey || '').trim())
+const weekMetaRef = computed(() => ({ from: props.weekFrom, to: props.weekTo }))
+
+const monthApi = useSpecialSale(props.scope, effectiveMonth)
+const weekApi = useSpecialSaleWeek(props.scope, weekKeyRef, weekMetaRef)
+
+function currentEntries() {
+  return isWeekMode.value ? weekApi.currentEntries() : monthApi.currentEntries()
+}
+function addEntry() {
+  if (isWeekMode.value) weekApi.addEntry()
+  else monthApi.addEntry()
+}
+function removeEntry(id) {
+  if (isWeekMode.value) weekApi.removeEntry(id)
+  else monthApi.removeEntry(id)
+}
+async function saveSale() {
+  return isWeekMode.value ? weekApi.saveSale() : monthApi.saveSale()
+}
+function resetSale() {
+  if (isWeekMode.value) weekApi.resetSale()
+  else monthApi.resetSale()
+}
 
 const entries = computed(() => currentEntries())
-
 const saving = ref(false)
 const saveMsg = ref('')
 const saveErr = ref('')
+const periodLabel = computed(() => {
+  if (!isWeekMode.value) return effectiveMonth.value
+  const parsed = parseFriThuWeekKey(props.weekKey)
+  if (parsed && props.weekFrom && props.weekTo) {
+    return formatFriThuWeekTabLabel(parsed.weekIndex, props.weekFrom, props.weekTo)
+  }
+  return String(props.weekKey || '')
+})
 
 function normalizeEntryField(entry, key) {
   const normalized = normalizeSpecialSaleEntry(entry)
@@ -61,7 +96,9 @@ async function onSave() {
     saveMsg.value =
       result?.mode === 'local' && result.warning
         ? result.warning
-        : `${effectiveMonth.value} 특판 매출이 저장되었습니다.`
+        : isWeekMode.value
+          ? `${periodLabel.value} 주간 특판 매출이 저장되었습니다.`
+          : `${effectiveMonth.value} 특판 매출이 저장되었습니다.`
     emit('saved')
   } catch (e) {
     saveErr.value = e?.message || '저장에 실패했습니다.'
@@ -71,7 +108,8 @@ async function onSave() {
 }
 
 async function onReset() {
-  if (!confirm(`${effectiveMonth.value} 특판 입력값을 모두 비우고 저장할까요?`)) return
+  const label = isWeekMode.value ? periodLabel.value : effectiveMonth.value
+  if (!confirm(`${label} 특판 입력값을 모두 비우고 저장할까요?`)) return
   resetSale()
   await onSave()
 }
@@ -80,10 +118,17 @@ async function onReset() {
 <template>
   <div class="special-sale-panel">
     <p class="standard-ref section-hint">
-      오픈마켓 엑셀에 없는 <strong>특판·위탁</strong> 실적을 넣습니다.
-      <strong>+</strong>로 행을 추가하고, 특판 이름·매출·마진만 입력하세요.
-      <strong>마진율</strong>은 자동 계산되며, 매출이 비어 있으면 KPI·엑셀에 출력하지 않습니다.
-      월별 총 매출 = <strong>일별 매출 합계 + 해당 월 특판</strong>입니다.
+      <template v-if="isWeekMode">
+        이 <strong>주차</strong> 특판·위탁입니다. 다른 주차와는 겹치지 않고,
+        <strong>월별 KPI·월별 다운에도 합산</strong>됩니다.
+      </template>
+      <template v-else>
+        오픈마켓 엑셀에 없는 <strong>특판·위탁</strong> 실적을 넣습니다.
+        <strong>+</strong>로 행을 추가하고, 특판 이름·매출·마진만 입력하세요.
+        <strong>마진율</strong>은 자동 계산되며, 매출이 비어 있으면 KPI·엑셀에 출력하지 않습니다.
+        월별 총 매출 = <strong>일별 매출 합계 + 월 특판 + 해당 달 주간 특판</strong>입니다.
+        (주간에만 입력해도 월별에 반영됩니다. 월·주에 같은 건을 중복 입력하지 마세요.)
+      </template>
     </p>
 
     <div class="table-wrap">

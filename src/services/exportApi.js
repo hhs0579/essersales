@@ -10,7 +10,7 @@ import { isPgExportMode } from './exportApiMode.js'
 
  * @param {Record<string, string>} params — 쿼리 파라미터 (scope, from, to …)
 
- * @param {Record<string, unknown>} [settingsOverrides] — 클라이언트 스냅샷 (special_sale, combined_comments …)
+ * @param {Record<string, unknown>} [settingsOverrides] — 클라이언트 스냅샷 (special_sale, manual_expense …)
 
  */
 

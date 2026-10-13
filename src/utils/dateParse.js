@@ -13,6 +13,32 @@ function fromYmd(year, month, day) {
   }
 }
 
+/**
+ * SheetJS(cellDates)는 1899년 로컬 오프셋을 분 단위로 반올림해 계산함.
+ * 서울(LMT +8:27:52)에서는 52초 모자라 날짜 셀이 전날 23:59:08로 읽힘 → 초 단위 오차만큼 되돌림.
+ */
+const SHEETJS_EPOCH_ERR_MS = (() => {
+  const base = new Date(1899, 11, 30)
+  const exactMs = Date.UTC(1899, 11, 30) - base.getTime()
+  const roundedMs = -base.getTimezoneOffset() * 60000
+  return exactMs - roundedMs
+})()
+
+/** @param {Date} d */
+export function correctSheetJsDate(d) {
+  if (!SHEETJS_EPOCH_ERR_MS) return d
+  return new Date(d.getTime() + SHEETJS_EPOCH_ERR_MS)
+}
+
+/** 엑셀 Date 셀 → YYYY-MM-DD (로컬 날짜, SheetJS 오차 보정) */
+export function excelDateToYmd(d) {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return ''
+  const c = correctSheetJsDate(d)
+  const m = String(c.getMonth() + 1).padStart(2, '0')
+  const day = String(c.getDate()).padStart(2, '0')
+  return `${c.getFullYear()}-${m}-${day}`
+}
+
 /** 엑셀 일련번호(44927 등) → 날짜 */
 function fromExcelSerial(serial) {
   const n = Number(serial)
@@ -27,7 +53,8 @@ export function parseSalesDate(str) {
   if (str == null || str === '') return null
 
   if (str instanceof Date && !isNaN(str.getTime())) {
-    return fromYmd(str.getFullYear(), str.getMonth() + 1, str.getDate())
+    const c = correctSheetJsDate(str)
+    return fromYmd(c.getFullYear(), c.getMonth() + 1, c.getDate())
   }
 
   const s = String(str).trim()

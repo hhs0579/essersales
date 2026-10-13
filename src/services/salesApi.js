@@ -3,7 +3,9 @@ import {
   pgDeleteSalesRecord,
   pgDeleteUpload,
   pgUploadExcel,
+  pgDownloadUploadOriginal,
 } from './pgApiClient.js'
+import { triggerBlobDownload } from './exportApi.js'
 import {
   fetchSalesRecords,
   fetchSalesRecordsPage,
@@ -139,4 +141,11 @@ export async function deleteSalesRecord(id) {
 
 export async function deleteUploadAndRecords(uploadId) {
   return pgDeleteUpload(uploadId)
+}
+
+/** 서버에 저장된 업로드 원본 엑셀 다시 받기 */
+export async function downloadUploadOriginal(uploadId) {
+  const { blob, fileName } = await pgDownloadUploadOriginal(uploadId)
+  triggerBlobDownload(blob, fileName)
+  return { fileName }
 }

@@ -31,7 +31,7 @@ import {
   matchesCombinedReportBrand,
   isEsserReportBrandChannel,
 } from './recordSourceLabel.js'
-import { MANUAL_AD_SOURCE_DEFS, isManualAdKpiLabel } from '../config/manualAdSpend.js'
+import { MANUAL_AD_SOURCE_DEFS, formatExternalAdKpiLabel, isManualAdKpiLabel } from '../config/manualAdSpend.js'
 import { isPowerPriceRecord } from '../config/powerPrice.js'
 import { isReturnRecord } from './transactionType.js'
 import { parsePlaceholderToken } from './profitLossTemplateParser.js'
@@ -44,7 +44,7 @@ import { formatDayOverDayPct, salesComparisonSectionTitle, salesComparisonCurren
 import { buildIntegratedSegmentKpiExcelRows } from './integratedKpiExcel.js'
 import { COMBINED_HIDDEN_KPI_KEYS } from '../config/combinedChannel.js'
 import { UI_BUILD_ID } from '../constants/appVersion.js'
-import { summarizeSpecialSaleEntry, specialSaleEntryLabel, getSpecialSaleEntries, hasSpecialSaleEntryInput } from './specialSaleKpi.js'
+import { summarizeSpecialSaleEntry, specialSaleEntryLabel, mergeSpecialSaleEntriesByLabel, hasSpecialSaleEntryInput } from './specialSaleKpi.js'
 
 /** ①요약리포트 레이아웃 버전 — 엑셀에 표시해 적용 여부 확인 */
 export const INTEGRATED_REPORT_LAYOUT_VER = 36
@@ -78,8 +78,9 @@ export function sumSegmentRowsExcludingTotal(splitRows) {
   }
   for (const row of splitRows || []) {
     if (!row || row.label === '합계' || isManualAdKpiLabel(row.label)) continue
+    const isExpense = row.kind === 'manual_expense' || row.segmentKey === 'manual_expense'
     acc.sales += row.profit?.sales || 0
-    acc.totalCost += row.profit?.totalCost || 0
+    if (!isExpense) acc.totalCost += row.profit?.totalCost || 0
     acc.netProfit += row.profit?.netProfit || 0
     acc.adSpend += row.ad?.adSpend || 0
     acc.salesQty += row.profit?.salesQty || 0
@@ -234,7 +235,7 @@ function buildExternalAdRows(channelGroups, manualFilterCtx) {
         const dateLabel =
           manualFilterCtx?.period === 'monthly' ? ymd.slice(0, 7) : ymd
         rows.push([
-          `${label} · ${def.kpiLabel}`,
+          formatExternalAdKpiLabel(label, def.kpiLabel),
           dateLabel,
           fmtAmt(sums.adSpend),
           fmtAmt(sums.adSales),
@@ -360,15 +361,15 @@ function specialSaleStoreRow(entry) {
 
 function collectExternalAdSupplementRows(channelGroups, manualFilterCtx) {
   const rows = []
-  for (const def of MANUAL_AD_SOURCE_DEFS) {
-    const row = externalAdSupplementRow(
-      def.kpiLabel,
-      summarizeManualAdKpiOnly(
-        collectEntriesBySource(channelGroups, def.value),
-        manualFilterCtx,
-      ),
-    )
-    if (row) rows.push(row)
+  for (const { label, entries } of channelGroups || []) {
+    const bySource = groupManualAdEntriesBySource(entries)
+    for (const def of MANUAL_AD_SOURCE_DEFS) {
+      const row = externalAdSupplementRow(
+        formatExternalAdKpiLabel(label, def.kpiLabel),
+        summarizeManualAdKpiOnly(bySource[def.value] || [], manualFilterCtx),
+      )
+      if (row) rows.push(row)
+    }
   }
   return rows
 }
@@ -456,7 +457,7 @@ function collectSalesMethodGroups(records, channelGroups = [], manualFilterCtx =
       salesMethodDataRow(label || '기타', group, totalSales, channelGroups, manualFilterCtx),
     )
 
-  for (const entry of getSpecialSaleEntries(manualFilterCtx?.specialSale)) {
+  for (const entry of mergeSpecialSaleEntriesByLabel(manualFilterCtx?.specialSale)) {
     const ssRow = specialSaleSalesMethodRow(entry, combinedTotal.sales || 0)
     if (ssRow) body.push(ssRow)
   }
@@ -692,9 +693,11 @@ function emptyStoreRollup(label) {
 function addSegmentRowToStoreRollup(acc, row) {
   const p = row?.profit || {}
   const a = row?.ad || {}
+  const isExpense = row?.kind === 'manual_expense' || row?.segmentKey === 'manual_expense'
   acc.sales += Number(p.sales) || 0
   acc.salesQty += Number(p.salesQty) || 0
-  acc.totalCost += Number(p.totalCost) || 0
+  // 수기 지출은 원가(상품원가)가 아니라 순이익만 차감
+  if (!isExpense) acc.totalCost += Number(p.totalCost) || 0
   acc.netProfit += Number(p.netProfit) || 0
   acc.adSpend += Number(a.adSpend) || 0
   acc.adSales += Number(a.adSales) || 0

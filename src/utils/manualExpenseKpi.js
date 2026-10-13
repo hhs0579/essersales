@@ -54,7 +54,7 @@ export function summarizeManualExpenseEntry(entry) {
   return finalizeEsserBucket({
     sales: 0,
     salesQty: 0,
-    totalCost: amount,
+    totalCost: 0,
     netProfit: -amount,
     adSpend: 0,
     adSales: 0,
@@ -86,10 +86,22 @@ export function buildManualExpenseKpiRowForEntry(entry) {
   }
 }
 
-/** @param {{ entries?: unknown[] } | null | undefined} data */
+/**
+ * 같은 이름(라벨) 지출은 한 행으로 합산
+ * @param {{ entries?: unknown[] } | null | undefined} data
+ */
 export function buildManualExpenseKpiRows(data) {
-  return getManualExpenseEntries(data)
-    .map((entry) => buildManualExpenseKpiRowForEntry(entry))
+  /** @type {Map<string, { name: string, amount: number }>} */
+  const byLabel = new Map()
+  for (const entry of getManualExpenseEntries(data)) {
+    if (!hasManualExpenseEntryInput(entry)) continue
+    const label = manualExpenseEntryLabel(entry)
+    const acc = byLabel.get(label) || { name: label, amount: 0 }
+    acc.amount += parseAmount(entry.amount) || 0
+    byLabel.set(label, acc)
+  }
+  return [...byLabel.values()]
+    .map((acc) => buildManualExpenseKpiRowForEntry({ name: acc.name, amount: String(acc.amount) }))
     .filter(Boolean)
 }
 
@@ -118,13 +130,23 @@ export function isManualExpenseSegmentKind(row) {
 }
 
 /**
- * app_settings manual_expense raw → 해당 월 { entries }
  * @param {unknown} raw
  * @param {string} [monthKey]
+ * @param {{ dateFrom?: string, dateTo?: string }} [opts]
  */
-export function pickManualExpenseSettingForMonth(raw, monthKey = '') {
+export function pickManualExpenseSettingForMonth(raw, monthKey = '', opts = {}) {
   if (!raw || typeof raw !== 'object') return null
   const o = /** @type {Record<string, unknown>} */ (raw)
+  const from = String(opts.dateFrom || '').trim()
+  const to = String(opts.dateTo || '').trim()
+  const partialRange =
+    /^\d{4}-\d{2}-\d{2}$/.test(from) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(to) &&
+    !isFullCalendarMonthRange(from, to)
+  const weekRange = partialRange ? { from, to } : null
+
+  /** @type {ReturnType<typeof normalizeManualExpenseEntry>[]} */
+  let entries = []
 
   if (o.months && typeof o.months === 'object') {
     const months = /** @type {Record<string, unknown>} */ (o.months)
@@ -137,17 +159,98 @@ export function pickManualExpenseSettingForMonth(raw, monthKey = '') {
     }
     const pickKey = paddedWanted || Object.keys(byPadded).sort().pop() || ''
     const bucket = pickKey ? byPadded[pickKey] : null
-    if (!bucket || typeof bucket !== 'object') return { entries: [] }
-    const entries = getManualExpenseEntries(
-      Array.isArray(bucket) ? { entries: bucket } : bucket,
-    ).map(normalizeManualExpenseEntry)
+    if (!partialRange && bucket && typeof bucket === 'object') {
+      entries = getManualExpenseEntries(
+        Array.isArray(bucket) ? { entries: bucket } : bucket,
+      ).map(normalizeManualExpenseEntry)
+    }
+    const mkForWeeks = pickKey || paddedWanted
+    if (mkForWeeks) {
+      entries = [...entries, ...collectManualExpenseWeekEntriesFromRaw(o.weeks, mkForWeeks, weekRange)]
+    }
     return { entries }
   }
 
   if (Array.isArray(o.entries)) {
-    return { entries: o.entries.map((e) => normalizeManualExpenseEntry(/** @type {Record<string, unknown>} */ (e))) }
+    if (!partialRange) {
+      entries = o.entries.map((e) =>
+        normalizeManualExpenseEntry(/** @type {Record<string, unknown>} */ (e)),
+      )
+    }
+    const mk = padMonthKey(monthKey)
+    if (mk) entries = [...entries, ...collectManualExpenseWeekEntriesFromRaw(o.weeks, mk, weekRange)]
+    return { entries }
+  }
+
+  const mkOnly = padMonthKey(monthKey)
+  if (mkOnly && o.weeks) {
+    return { entries: collectManualExpenseWeekEntriesFromRaw(o.weeks, mkOnly, weekRange) }
   }
   return { entries: [] }
+}
+
+function isFullCalendarMonthRange(from, to) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return false
+  if (from.slice(0, 7) !== to.slice(0, 7)) return false
+  const y = Number(from.slice(0, 4))
+  const m = Number(from.slice(5, 7))
+  const last = new Date(y, m, 0).getDate()
+  return from.endsWith('-01') && to === `${from.slice(0, 7)}-${String(last).padStart(2, '0')}`
+}
+
+/** @param {unknown} weeksRaw @param {string} monthKey @param {{ from: string, to: string } | null} [range] */
+function collectManualExpenseWeekEntriesFromRaw(weeksRaw, monthKey, range = null) {
+  if (!weeksRaw || typeof weeksRaw !== 'object') return []
+  const mk = padMonthKey(monthKey)
+  if (!mk) return []
+  const weeks = /** @type {Record<string, unknown>} */ (weeksRaw)
+  const keys = Object.keys(weeks)
+    .filter((wk) => wk.startsWith(`${mk}-W`) && /^\d{4}-\d{2}-W[1-6]$/.test(wk))
+    .sort()
+  /** @type {ReturnType<typeof normalizeManualExpenseEntry>[]} */
+  const out = []
+  for (const wk of keys) {
+    const bucket = weeks[wk]
+    if (!bucket || typeof bucket !== 'object') continue
+    if (range) {
+      const b = /** @type {Record<string, unknown>} */ (bucket)
+      const wf = String(b.from || '').trim()
+      const wt = String(b.to || '').trim()
+      if (/^\d{4}-\d{2}-\d{2}$/.test(wf) && /^\d{4}-\d{2}-\d{2}$/.test(wt)) {
+        if (wt < range.from || wf > range.to) continue
+      }
+    }
+    out.push(
+      ...getManualExpenseEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+        normalizeManualExpenseEntry,
+      ),
+    )
+  }
+  return out
+}
+
+const FRI_THU_WEEK_KEY_RE = /^\d{4}-\d{2}-W[1-6]$/
+
+/**
+ * app_settings manual_expense raw → 해당 금~목 주차 { entries }
+ * @param {unknown} raw
+ * @param {string} [weekKey]
+ */
+export function pickManualExpenseSettingForWeek(raw, weekKey = '') {
+  const wk = String(weekKey || '').trim()
+  if (!FRI_THU_WEEK_KEY_RE.test(wk)) return null
+  if (!raw || typeof raw !== 'object') return { entries: [] }
+  const o = /** @type {Record<string, unknown>} */ (raw)
+  const weeks =
+    o.weeks && typeof o.weeks === 'object'
+      ? /** @type {Record<string, unknown>} */ (o.weeks)
+      : {}
+  const bucket = weeks[wk]
+  if (!bucket || typeof bucket !== 'object') return { entries: [] }
+  const entries = getManualExpenseEntries(
+    Array.isArray(bucket) ? { entries: bucket } : bucket,
+  ).map(normalizeManualExpenseEntry)
+  return { entries }
 }
 
 /**
@@ -179,13 +282,26 @@ export function mergeManualExpenseSettingRaw(dbRaw, overrideRaw, monthKey = '') 
       const pk = padMonthKey(mk) || mk
       if (pk) dbMonths[pk] = bucket
     }
-    return { months: dbMonths }
+  } else {
+    const mk = padMonthKey(monthKey)
+    if (mk && Array.isArray(ov.entries)) {
+      dbMonths[mk] = { entries: ov.entries }
+    }
   }
 
-  const mk = padMonthKey(monthKey)
-  if (mk && Array.isArray(ov.entries)) {
-    dbMonths[mk] = { entries: ov.entries }
-    return { months: dbMonths }
+  const dbWeeks =
+    db.weeks && typeof db.weeks === 'object'
+      ? { .../** @type {Record<string, unknown>} */ (db.weeks) }
+      : {}
+  const ovWeeks =
+    ov.weeks && typeof ov.weeks === 'object'
+      ? /** @type {Record<string, unknown>} */ (ov.weeks)
+      : null
+  if (ovWeeks) {
+    for (const [wk, bucket] of Object.entries(ovWeeks)) {
+      if (FRI_THU_WEEK_KEY_RE.test(wk)) dbWeeks[wk] = bucket
+    }
   }
-  return ov
+
+  return { version: 2, months: dbMonths, weeks: dbWeeks }
 }

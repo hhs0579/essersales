@@ -78,8 +78,10 @@ export function enrichExportRecords(records, scope, options = {}) {
 
   if (combinedIncludesPowerPrice(scope) && powerPriceStore && isCombinedScope(scope)) {
     const ppRows = buildPowerPriceDetailRows(
-      powerPriceStore.products || [],
-      powerPriceStore.sales || [],
+      [],
+      [],
+      powerPriceStore.confirmLines || [],
+      powerPriceStore.costMaster || [],
     ).map((r) => ({
       ...r,
       dataSourceLabel: POWER_PRICE_DATA_SOURCE_LABEL,

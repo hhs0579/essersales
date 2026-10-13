@@ -2,11 +2,7 @@
 import { ref } from 'vue'
 import ExcelUpload from './ExcelUpload.vue'
 import { PLATFORMS } from '../constants/platforms.js'
-import {
-  deleteUploadAndRecords,
-  fetchUploads,
-  savePlatformMonthlyUpload,
-} from '../services/salesApi.js'
+import { savePlatformMonthlyUpload } from '../services/salesApi.js'
 import {
   detectPlatformFromFileName,
   resolveUploadPlatform,
@@ -51,17 +47,7 @@ async function onFilesSelected(fileList) {
       if (fromName) platform.value = fromName
       const resolvedPlatform = resolveUploadPlatform(fileName, platform.value, [])
 
-      progressMessage.value = `${filePrefix}기존 중복 데이터 검사 중...`
-      await yieldTick()
-
-      const uploads = await fetchUploads()
-      const sameName = uploads.filter(
-        (u) => u.fileName === fileName && u.uploadKind === props.uploadKind,
-      )
-      for (const u of sameName) {
-        await deleteUploadAndRecords(u.id)
-      }
-
+      // 같은 파일명 기존 배치는 서버가 저장 트랜잭션 안에서 교체 (실패 시 기존 데이터 유지)
       progressMessage.value = `${filePrefix}업로드 중...`
       await yieldTick()
       progressMessage.value = `${filePrefix}서버 처리 중...`

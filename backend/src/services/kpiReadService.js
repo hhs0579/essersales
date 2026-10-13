@@ -21,7 +21,8 @@ import {
   mergePlatformWithManual,
   mergeCompareYesterdayWithManual,
 } from '../utils/manualAdKpiMerge.js'
-import { loadManualAdEntriesForScope } from './manualAdLoadService.js'
+import { loadManualAdEntriesForScope, loadManualAdChannelGroups } from './manualAdLoadService.js'
+import { findExternalAdChannelByScope } from '../../../src/config/externalAdChannels.js'
 import {
   applyRecordFilters,
   applyKpiDetailFilters,
@@ -209,7 +210,8 @@ async function applyManualMerge(base, filters, merger) {
     return base
   }
   const filterCtx = filterCtxFromKpiFilters(filters)
-  return merger(base, manualEntries, filterCtx)
+  const brandLabel = findExternalAdChannelByScope(filters.scope)?.label || ''
+  return merger(base, manualEntries, filterCtx, { brandLabel })
 }
 
 /**
@@ -424,11 +426,10 @@ export async function getKpiBySegment(query) {
       )
     : null
 
-  // 수기 광고를 buildCombined에 넣어 클라와 동일하게 Meta·GFA 행·합계 광고비 반영
+  // 수기 광고를 buildCombined에 넣어 클라와 동일하게 브랜드×플랫폼 행·합계 광고비 반영
   // (별도 mergePlatformWithManual 시 이중계상 방지를 위해 여기서 종료)
-  const manualEntries = await maybeLoadManualAds(filters)
-  const channelGroups = manualEntries.length
-    ? [{ label: '통합', entries: manualEntries }]
+  const channelGroups = filters.includeManualAds
+    ? await loadManualAdChannelGroups(filters.scope)
     : []
 
   const { items, totalRow } = mergeSqlAndSettingsSegments(

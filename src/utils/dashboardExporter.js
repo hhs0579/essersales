@@ -1167,7 +1167,6 @@ export function buildDashboardWorkbook({
   specialSale = null,
   specialSaleByMonth = null,
   manualExpense = null,
-  combinedComments = null,
   hiddenKpiKeys = [],
   isCombined = false,
   profitLossTemplate = null,
@@ -1368,7 +1367,6 @@ export function buildDashboardWorkbook({
         totalKpi,
         costKpi: integratedCostKpi,
         dayOverDayComputed,
-        combinedComments,
         splitRows: combinedSplitRows,
       })
     : buildSummaryReportSheet({

@@ -17,6 +17,7 @@ export function createPool(dbConfig) {
     max: Number(process.env.DB_POOL_MAX || 20),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 15_000,
+    statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 180_000),
   })
 
   pool.on('error', (err) => {

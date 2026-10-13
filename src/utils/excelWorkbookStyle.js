@@ -1,10 +1,7 @@
 import ExcelJS from 'exceljs'
-import { COMBINED_COMMENT_LABELS } from '../config/combinedComments.js'
 import { DAY_OVER_DAY_BRAND_LABELS } from './recordSourceLabel.js'
 import { DAY_OVER_DAY_PLATFORM_LABELS } from './dayOverDaySales.js'
 import { COMBINED_BRAND_DAY_OVER_DAY_LABELS } from './dayOverDaySales.js'
-
-const COMBINED_COMMENT_LABEL_SET = new Set(COMBINED_COMMENT_LABELS)
 
 const INTEGRATED_DOD_ROW_LABELS = new Set([
   ...DAY_OVER_DAY_PLATFORM_LABELS,
@@ -546,63 +543,6 @@ function isTotalRow(row) {
   return t.startsWith('【') && t.endsWith('】')
 }
 
-function isCombinedCommentsSectionRow(row) {
-  return /^■ 통합 담당 코멘트/.test(cellText(row[0]))
-}
-
-/** 통합 코멘트 — 일별 소제목 (■ 2026-07-13 / ■ 날짜 미지정…) */
-function isCombinedCommentsDayHeader(row, inCombinedCommentsSection) {
-  if (!inCombinedCommentsSection) return false
-  return /^■ (\d{4}-\d{2}-\d{2}|날짜 미지정)/.test(cellText(row[0]))
-}
-
-/** 코멘트 블록만 — 2열(구분·본문). 스토어별 등 다열 표와 구분 */
-function isCombinedCommentsDataRow(row, inCombinedCommentsSection) {
-  if (!inCombinedCommentsSection) return false
-  if (row.length !== 2) return false
-  return COMBINED_COMMENT_LABEL_SET.has(cellText(row[0]))
-}
-
-/** 통합 코멘트 행 — 빈 칸도 기본 높이 150pt */
-const COMBINED_COMMENT_ROW_HEIGHT = 150
-
-function paintCombinedCommentsDataRow(ws, rowNum, row, values, contentColEnd) {
-  const labelCell = row.getCell(1)
-  labelCell.value = values[0]
-  labelCell.font = { size: 11, bold: true, color: { argb: 'FF334155' } }
-  labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.zebra } }
-  labelCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }
-  labelCell.border = thinBorder()
-
-  const comment = values[1] != null ? String(values[1]) : ''
-  const commentCell = row.getCell(2)
-  commentCell.value = comment === '' ? '' : comment
-  commentCell.font = { size: 11, color: { argb: 'FF0F172A' } }
-  commentCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } }
-  commentCell.alignment = { vertical: 'top', horizontal: 'left', wrapText: true }
-  commentCell.border = thinBorder()
-
-  for (let c = 3; c <= contentColEnd; c += 1) {
-    const cell = row.getCell(c)
-    cell.value = ''
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } }
-    cell.border = thinBorder()
-  }
-
-  if (contentColEnd > 2) {
-    try {
-      ws.mergeCells(rowNum, 2, rowNum, contentColEnd)
-    } catch {
-      /* 병합 불가 시 2열만 사용 */
-    }
-  }
-
-  const contentLines = comment
-    ? Math.max(3, Math.ceil(displayWidth(comment) / 72))
-    : 3
-  row.height = Math.max(COMBINED_COMMENT_ROW_HEIGHT, 12 + contentLines * 16)
-}
-
 function isManualAdTableHeader(row) {
   const first = cellText(row[0])
   return (first === '일자' || first === '월') && cellText(row[1]) === '광고비용' && cellText(row[2]) === '전환매출액'
@@ -1034,19 +974,6 @@ export function addStyledSheet(workbook, sheetName, rows, opts = {}) {
   let tableBoxCols = 0
   let dualGapStart = 0
   let dualGapEnd = 0
-  let combinedCommentsBoxStart = 0
-  let combinedCommentsBoxEnd = 0
-  let combinedCommentsColEnd = 0
-  let inCombinedCommentsSection = false
-
-  const closeCombinedCommentsBox = (endRow = combinedCommentsBoxEnd) => {
-    if (combinedCommentsBoxStart > 0 && combinedCommentsColEnd > 0) {
-      closeTableBox(ws, combinedCommentsBoxStart, endRow, combinedCommentsColEnd)
-    }
-    combinedCommentsBoxStart = 0
-    combinedCommentsBoxEnd = 0
-    combinedCommentsColEnd = 0
-  }
 
   const closeDualGapMerge = () => {
     if (dualGapStart > 0) {
@@ -1074,15 +1001,6 @@ export function addStyledSheet(workbook, sheetName, rows, opts = {}) {
     const row = ws.getRow(rowNum)
 
     if (isEmptyRow(values)) {
-      closeCombinedCommentsBox(rowNum - 1)
-      // 일별 코멘트 사이 빈 행에서 섹션을 끊으면 둘째 날부터 day header/본문 스타일이 빠짐
-      const next = sheetRows[ri + 1]
-      const stayInCombinedComments =
-        inCombinedCommentsSection &&
-        next &&
-        !isEmptyRow(next) &&
-        (isCombinedCommentsDayHeader(next, true) || isCombinedCommentsDataRow(next, true))
-      if (!stayInCombinedComments) inCombinedCommentsSection = false
       closeDualGapMerge()
       inTable = false
       tableHeaderLabels = []
@@ -1122,48 +1040,6 @@ export function addStyledSheet(workbook, sheetName, rows, opts = {}) {
         alignment: { vertical: 'middle', horizontal: 'left', wrapText: true },
       })
       row.height = 22
-      return
-    }
-
-    if (isCombinedCommentsSectionRow(values)) {
-      closeCombinedCommentsBox(rowNum - 1)
-      endTableBox(rowNum - 1)
-      inTable = false
-      tableHeaderLabels = []
-      lastTableHeaderLabels = []
-      inCombinedCommentsSection = true
-      paintFullRowBanner(ws, rowNum, row, cellText(values[0]), bannerCols, {
-        font: { bold: true, size: 12, color: { argb: XL.sectionFg } },
-        fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E7FF' } },
-        alignment: { vertical: 'middle', horizontal: 'left', wrapText: true },
-      })
-      row.height = 24
-      return
-    }
-
-    if (isCombinedCommentsDayHeader(values, inCombinedCommentsSection)) {
-      endTableBox(rowNum - 1)
-      inTable = false
-      tableHeaderLabels = []
-      lastTableHeaderLabels = []
-      paintFullRowBanner(ws, rowNum, row, cellText(values[0]), bannerCols, {
-        font: { bold: true, size: 11, color: { argb: XL.sectionFg } },
-        fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } },
-        alignment: { vertical: 'middle', horizontal: 'left', wrapText: true },
-      })
-      row.height = 22
-      return
-    }
-
-    if (isCombinedCommentsDataRow(values, inCombinedCommentsSection)) {
-      endTableBox(rowNum - 1)
-      inTable = false
-      tableHeaderLabels = []
-      lastTableHeaderLabels = []
-      if (!combinedCommentsBoxStart) combinedCommentsBoxStart = rowNum
-      combinedCommentsBoxEnd = rowNum
-      combinedCommentsColEnd = bannerCols
-      paintCombinedCommentsDataRow(ws, rowNum, row, values, bannerCols)
       return
     }
 
@@ -1401,7 +1277,6 @@ export function addStyledSheet(workbook, sheetName, rows, opts = {}) {
     writePlainRow(row, values)
   })
 
-  closeCombinedCommentsBox(sheetRows.length)
   closeDualGapMerge()
   endTableBox(sheetRows.length)
 

@@ -157,7 +157,9 @@ async function ensureOwnMallSourceBase64Loaded() {
     return localFiles
   }
 
-  const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+  const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND, {
+    trackBase: false,
+  })
   const serverFiles = normalizeSalesSourceFiles(full?.data?.salesSourceFiles)
   const merged = fillOwnMallSourceBase64FromServer(localFiles, serverFiles)
   storeRef.value = { ...storeRef.value, salesSourceFiles: merged }
@@ -175,7 +177,9 @@ async function mergeOwnMallSourcesForPersist(store) {
 
   let serverFiles = []
   try {
-    const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND)
+    const full = await fetchAppSetting(OWN_MALL_MANUAL_SCOPE, OWN_MALL_MANUAL_SETTING_KIND, {
+      trackBase: false,
+    })
     serverFiles = normalizeSalesSourceFiles(full?.data?.salesSourceFiles)
   } catch {
     if (localFiles.some((f) => f.id || f.fileName) && !sourceHasBase64(localFiles)) {
@@ -448,6 +452,26 @@ export function useOwnMallManual() {
     return storeRef.value.sales.filter((s) => s.importSourceId === sourceId).length
   }
 
+  /** 저장된 판매 엑셀 원본 다시 받기 */
+  async function downloadSalesSourceFile(sourceId) {
+    const id = String(sourceId || '').trim()
+    if (!id) throw new Error('원본 파일이 없습니다.')
+    await ensureOwnMallSourceBase64Loaded()
+    const file = (storeRef.value.salesSourceFiles || []).find((f) => f.id === id)
+    if (!file?.dataBase64) {
+      throw new Error('원본 엑셀을 불러오지 못했습니다. 새로고침 후 다시 시도하세요.')
+    }
+    const bin = atob(file.dataBase64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i)
+    const blob = new Blob([bytes], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const { triggerBlobDownload } = await import('../services/exportApi.js')
+    triggerBlobDownload(blob, file.fileName || 'own_mall_sales.xlsx')
+    return { fileName: file.fileName }
+  }
+
   async function saveStore() {
     await persistOwnMallManualStore()
   }
@@ -463,6 +487,7 @@ export function useOwnMallManual() {
     importSalesExcelFile,
     removeSalesSourceFile,
     reapplyAllSalesSourceFiles,
+    downloadSalesSourceFile,
     salesCountForSource,
     saveStore,
   }

@@ -41,6 +41,10 @@ import {
 } from '../services/salesApi.js'
 import { pgDownloadTableExport } from '../services/apiClient.js'
 import { downloadMergedSalesReport, mergedFileName, dateRangeLabel } from '../utils/salesReportExporter.js'
+import {
+  detailsAreClosedMall,
+  downloadClosedMallReuploadExcel,
+} from '../utils/closedMallReuploadExporter.js'
 import { FEATURES } from '../config/features.js'
 import {
   allDataScopes,
@@ -60,7 +64,6 @@ import {
   dailyScopeForMonthly,
   isCombinedScope,
   isManualOnlyChannel,
-  isCombinedCommentsChannel,
 } from '../config/dataChannels.js'
 import {
   EXTERNAL_AD_CHANNELS,
@@ -69,10 +72,12 @@ import {
 } from '../config/externalAdChannels.js'
 import { INTEGRATED_REPORT_LAYOUT_VER } from '../utils/profitLossReportExporter.js'
 import { UI_BUILD_ID } from '../constants/appVersion.js'
-import { getSpecialSaleSnapshot, getSpecialSaleMonthlyMap, getSpecialSaleReactiveStore, getSpecialSaleSettingPayload } from '../composables/useSpecialSale.js'
+import { getSpecialSaleSnapshot, getSpecialSaleWeekSnapshot, getSpecialSaleMonthlyMap, getSpecialSaleReactiveStore, getSpecialSaleSettingPayload } from '../composables/useSpecialSale.js'
 import {
   getManualExpenseSnapshot,
+  getManualExpenseWeekSnapshot,
   getManualExpenseSettingPayload,
+  getManualExpenseReactiveStore,
 } from '../composables/useManualExpense.js'
 import {
   addMonthsToMonthKey,
@@ -201,6 +206,8 @@ const detailCacheError = ref('')
 const detailCacheLoadedAt = ref(null)
 /** detail 캐시 버전 — 업로드 성공 시 증가 */
 let detailCacheVersion = 0
+/** 서버는 export를 한 번에 하나만 처리 — 탭 간 중복 클릭 방지 */
+let exportInFlight = false
 /** @type {Promise<void> | null} */
 let detailCachePromise = null
 /** 현재 로드된 detail 캐시 버전 */
@@ -239,6 +246,8 @@ function createDefaultFilters() {
     brand: '',
     productName: '',
     option: '',
+    /** 통합 주간 — YYYY-MM-Wn (금~목). 있으면 주간 특판·지출 merge */
+    friThuWeekKey: '',
   }
 }
 
@@ -545,6 +554,7 @@ function buildTableListQuery(scope, slice, { page, tab } = {}) {
       ? 'detail'
       : activeTab
   const pageNo = Number(page) || slice.tablePagination.value.page || 1
+  const sendYearMonth = isMonthlyScope(scope) || !(f.dateFrom || f.dateTo)
   const q = {
     page: pageNo,
     limit: TABLE_PAGE_LIMIT,
@@ -569,8 +579,8 @@ function buildTableListQuery(scope, slice, { page, tab } = {}) {
     product_name: f.productName || '',
     option: f.option || '',
     date: f.date || '',
-    year: f.year || '',
-    month: f.month || '',
+    year: sendYearMonth ? f.year || '' : '',
+    month: sendYearMonth ? f.month || '' : '',
     day_of_week:
       f.dayOfWeek !== '' && f.dayOfWeek != null ? String(f.dayOfWeek) : '',
   }
@@ -812,7 +822,18 @@ async function ensureTabAggregateCache(tab) {
   }
 }
 
-async function refreshAll() {
+/** @type {Promise<void> | null} */
+let refreshAllPromise = null
+
+function refreshAll() {
+  if (refreshAllPromise) return refreshAllPromise
+  refreshAllPromise = runRefreshAll().finally(() => {
+    refreshAllPromise = null
+  })
+  return refreshAllPromise
+}
+
+async function runRefreshAll() {
   await hydrateAppSettings({ forceRefresh: true })
   invalidateDetailCache()
   invalidateServerKpiCaches()
@@ -848,14 +869,28 @@ async function reloadOpenTablePages() {
 /** @type {Promise<void> | null} */
 let coreLoadPromise = null
 
+/** 업로드 목록 실패 시 다음 화면 진입에서 재시도 (빈 목록으로 고정되지 않게) */
+let uploadsLoadFailed = false
+
 async function ensureCoreLoaded() {
-  if (initialized.value) return
+  if (initialized.value) {
+    if (uploadsLoadFailed) {
+      try {
+        await loadUploads()
+        uploadsLoadFailed = false
+      } catch {
+        /* error already set */
+      }
+    }
+    return
+  }
   if (coreLoadPromise) return coreLoadPromise
   coreLoadPromise = (async () => {
     try {
       await loadUploads()
+      uploadsLoadFailed = false
     } catch {
-      /* error already set */
+      uploadsLoadFailed = true
     }
     try {
       await hydrateAppSettings()
@@ -888,11 +923,11 @@ function getServerKpiCacheBundle(scope) {
   return { cacheKey, bundle: serverKpiResultCache.get(cacheKey) }
 }
 
-/** 대시보드 탭 KPI prefetch 대상 (직접입력·코멘트 제외) */
+/** 대시보드 탭 KPI prefetch 대상 (직접입력 제외) */
 function listPrefetchableKpiScopes() {
   const scopes = []
   for (const ch of getDashboardChannels()) {
-    if (!ch || isCombinedCommentsChannel(ch.id) || isManualOnlyChannel(ch.id)) continue
+    if (!ch || isManualOnlyChannel(ch.id)) continue
     for (const mode of ch.modes || []) {
       if (mode.id !== 'daily' && mode.id !== 'monthly') continue
       if (mode.scope) scopes.push(mode.scope)
@@ -1167,14 +1202,16 @@ function applyDirectInputKpiMergesToSlice(scope) {
   // 통합 월별 특판·수기 지출 — 서버 month 키 불일치·자사몰 merge 누락 대비 클라 보강
   if (isCombinedScope(scope) && isMonthlyScope(scope)) {
     const monthKey = monthKeyFromFilters(slice.filters.value)
-    const specialSale = getSpecialSaleSnapshot(scope, monthKey)
+    const f = slice.filters.value || {}
+    const rangeOpts = { dateFrom: f.dateFrom, dateTo: f.dateTo }
+    const specialSale = getSpecialSaleSnapshot(scope, monthKey, rangeOpts)
     slice.serverPlatformKpiRows.value = mergeSpecialSaleIntoCombinedSegmentRows(
       slice.serverPlatformKpiRows.value,
       specialSale,
     )
     slice.serverPlatformKpiRows.value = mergeManualExpenseIntoCombinedSegmentRows(
       slice.serverPlatformKpiRows.value,
-      getManualExpenseSnapshot(scope, monthKey),
+      getManualExpenseSnapshot(scope, monthKey, rangeOpts),
     )
 
     // 전월 by-segment — 자사몰·1P·특판·지출을 전월 기준으로 merge
@@ -1208,6 +1245,19 @@ function applyDirectInputKpiMergesToSlice(scope) {
       )
       slice.serverPrevMonthPlatformKpiRows.value = prevRows
     }
+  }
+
+  // 통합 주간 — 기간 KPI + 해당 주차 특판·지출만 (월 수기와 분리)
+  const weekKey = String(slice.filters.value?.friThuWeekKey || '').trim()
+  if (isCombinedScope(scope) && !isMonthlyScope(scope) && /^\d{4}-\d{2}-W[1-6]$/.test(weekKey)) {
+    slice.serverPlatformKpiRows.value = mergeSpecialSaleIntoCombinedSegmentRows(
+      slice.serverPlatformKpiRows.value,
+      getSpecialSaleWeekSnapshot(scope, weekKey),
+    )
+    slice.serverPlatformKpiRows.value = mergeManualExpenseIntoCombinedSegmentRows(
+      slice.serverPlatformKpiRows.value,
+      getManualExpenseWeekSnapshot(scope, weekKey),
+    )
   }
 }
 
@@ -1276,56 +1326,53 @@ async function loadServerKpiForScope(scope, opts = {}) {
     const bundle = await serverKpiResultCache.getOrLoad(cacheKey, async () => {
       const combined = isCombinedScope(scope)
       const summary = await fetchKpiSummary(query, { signal })
-      let daily = { items: [] }
-      try {
-        daily = await fetchKpiDaily(query, { signal })
-      } catch (err) {
-        if (err?.name === 'AbortError') throw err
-        daily = { items: [] }
+      /** @type {string[]} */
+      const partialFailures = []
+      const optional = async (label, load, fallback) => {
+        try {
+          return await load()
+        } catch (err) {
+          if (err?.name === 'AbortError') throw err
+          partialFailures.push(`${label}(${err?.message || err})`)
+          return fallback
+        }
       }
+      const daily = await optional('일별 추이', () => fetchKpiDaily(query, { signal }), { items: [] })
       let byPlatform = null
       let bySegment = null
       let bySegmentPrev = null
-      let compareYesterday = null
       if (!combined) {
-        try {
-          byPlatform = await fetchKpiByPlatform(query, { signal })
-        } catch (err) {
-          if (err?.name === 'AbortError') throw err
-          byPlatform = null
-        }
+        byPlatform = await optional('플랫폼별', () => fetchKpiByPlatform(query, { signal }), null)
       } else {
-        try {
-          bySegment = await fetchKpiBySegment(query, { signal })
-        } catch (err) {
-          if (err?.name === 'AbortError') throw err
-          bySegment = null
-        }
+        bySegment = await optional('세그먼트별', () => fetchKpiBySegment(query, { signal }), null)
         // 통합 월별 전월대비 — 전월 세그먼트(특판 포함) 병행 조회
         if (isMonthlyScope(scope)) {
           const prevQuery = shiftMonthlyKpiQuery(query, -1)
           if (prevQuery) {
-            try {
-              bySegmentPrev = await fetchKpiBySegment(prevQuery, { signal })
-            } catch (err) {
-              if (err?.name === 'AbortError') throw err
-              bySegmentPrev = null
-            }
+            bySegmentPrev = await optional(
+              '전월 세그먼트',
+              () => fetchKpiBySegment(prevQuery, { signal }),
+              null,
+            )
           }
         }
       }
-      try {
-        compareYesterday = await fetchKpiCompareYesterday(query, { signal })
-      } catch (err) {
-        if (err?.name === 'AbortError') throw err
-        compareYesterday = null
-      }
-      return { summary, daily, byPlatform, bySegment, bySegmentPrev, compareYesterday }
+      const compareYesterday = await optional(
+        '전일 대비',
+        () => fetchKpiCompareYesterday(query, { signal }),
+        null,
+      )
+      return { summary, daily, byPlatform, bySegment, bySegmentPrev, compareYesterday, partialFailures }
     })
 
     // 최신 요청만 반영. 동일 조건의 캐시는 남아 후속 요청/ensure가 재적용 가능
     if (!isCurrent()) return
     applyServerKpiBundleToSlice(scope, bundle)
+    if (bundle?.partialFailures?.length) {
+      // 일부 실패 결과는 캐시에 고정하지 않음 — 다음 조회에서 재시도
+      serverKpiResultCache.invalidateResult(cacheKey)
+      error.value = `KPI 일부 항목을 불러오지 못했습니다: ${bundle.partialFailures.join(', ')} — 새로고침으로 다시 시도하세요.`
+    }
   } catch (e) {
     if (e?.name === 'AbortError' || signal.aborted) {
       // 조건이 바뀌어 취소된 경우 — 최신 요청이 이어서 처리
@@ -1776,6 +1823,11 @@ function createScopedApi(scope) {
     const combined = isCombinedScope(scope)
     const canPgExport = isPgExportMode()
 
+    if (exportInFlight) {
+      error.value = '다른 엑셀 다운로드가 진행 중입니다. 완료 후 다시 시도해 주세요.'
+      return
+    }
+    exportInFlight = true
     error.value = ''
     saving.value = true
     try {
@@ -1795,21 +1847,31 @@ function createScopedApi(scope) {
       if (canPgExport) {
         const f = slice.filters.value
         const overrides = {}
+        const weekKey = String(f.friThuWeekKey || '').trim()
+        const weeklyCombined =
+          combined && !isMonthlyScope(scope) && /^\d{4}-\d{2}-W[1-6]$/.test(weekKey)
         if (combined && isMonthlyScope(scope)) {
           overrides.special_sale = getSpecialSaleSettingPayload(scope)
           overrides.manual_expense = getManualExpenseSettingPayload(scope)
+        } else if (weeklyCombined) {
+          overrides.special_sale = getSpecialSaleSettingPayload(scope)
+          overrides.manual_expense = getManualExpenseSettingPayload(scope)
         }
+        // 일별 화면은 기간(from~to)이 기준 — 남아 있는 연/월 필터가 겹치면 서버가 NO_DATA로 비워버림
+        const hasDateRange = Boolean(f.dateFrom || f.dateTo)
+        const sendYearMonth = isMonthlyScope(scope) || !hasDateRange
         try {
           const { blob, fileName } = await pgDownloadIntegratedExport(
             {
               scope,
               from: f.dateFrom,
               to: f.dateTo,
-              year: f.year,
-              month: f.month,
+              year: sendYearMonth ? f.year : '',
+              month: sendYearMonth ? f.month : '',
               platform: f.platform,
               sales_method: f.salesMethod,
               include_manual_ads: 'true',
+              ...(weeklyCombined ? { fri_thu_week_key: weekKey } : {}),
             },
             overrides,
           )
@@ -1844,6 +1906,9 @@ function createScopedApi(scope) {
       }
       const monthKey = resolveReferenceMonthKey(rows, exportFilterCtx)
       const monthlyCombined = combined && isMonthlyScope(scope)
+      const weekKey = String(slice.filters.value?.friThuWeekKey || '').trim()
+      const weeklyCombined =
+        combined && !isMonthlyScope(scope) && /^\d{4}-\d{2}-W[1-6]$/.test(weekKey)
       const specialSaleMonthlyMap = monthlyCombined
         ? getSpecialSaleMonthlyMap(scope, monthKey)
         : null
@@ -1861,10 +1926,23 @@ function createScopedApi(scope) {
         selectedUploadIds: slice.selectedUploadIds.value,
         manualAdByChannel,
         manualAdEntries: scopeManualAd,
-        specialSale: monthlyCombined ? getSpecialSaleSnapshot(scope, monthKey) : null,
+        specialSale: monthlyCombined
+          ? getSpecialSaleSnapshot(scope, monthKey, {
+              dateFrom: exportFilterCtx.dateFrom,
+              dateTo: exportFilterCtx.dateTo,
+            })
+          : weeklyCombined
+            ? getSpecialSaleWeekSnapshot(scope, weekKey)
+            : null,
         specialSaleByMonth,
-        manualExpense: monthlyCombined ? getManualExpenseSnapshot(scope, monthKey) : null,
-        combinedComments: null,
+        manualExpense: monthlyCombined
+          ? getManualExpenseSnapshot(scope, monthKey, {
+              dateFrom: exportFilterCtx.dateFrom,
+              dateTo: exportFilterCtx.dateTo,
+            })
+          : weeklyCombined
+            ? getManualExpenseWeekSnapshot(scope, weekKey)
+            : null,
         profitLossTemplate: combined ? getProfitLossTemplateSnapshot() : null,
         hiddenKpiKeys: combined
           ? COMBINED_HIDDEN_KPI_KEYS
@@ -1874,7 +1952,8 @@ function createScopedApi(scope) {
               ? COUPANG_1P_ROCKET_HIDDEN_KPI_KEYS
               : [],
         summarySheetOnly: isMonthlyScope(scope),
-        serverPlatformKpiRows: monthlyCombined ? slice.serverPlatformKpiRows.value || [] : [],
+        serverPlatformKpiRows:
+          monthlyCombined || weeklyCombined ? slice.serverPlatformKpiRows.value || [] : [],
         serverPrevMonthPlatformKpiRows: monthlyCombined
           ? slice.serverPrevMonthPlatformKpiRows.value || []
           : [],
@@ -1886,11 +1965,17 @@ function createScopedApi(scope) {
       error.value = `엑셀 다운로드 실패: ${e.message}`
     } finally {
       saving.value = false
+      exportInFlight = false
     }
   }
 
   async function downloadCurrentTableExport() {
     const tab = slice.activeTab.value
+    if (exportInFlight) {
+      error.value = '다른 엑셀 다운로드가 진행 중입니다. 완료 후 다시 시도해 주세요.'
+      return
+    }
+    exportInFlight = true
     error.value = ''
     saving.value = true
     try {
@@ -1940,12 +2025,13 @@ function createScopedApi(scope) {
       error.value = `엑셀 다운로드 실패: ${e.message}`
     } finally {
       saving.value = false
+      exportInFlight = false
     }
   }
 
   async function downloadMergedExcel() {
-    if (slice.selectedUploadIds.value.length < 2) {
-      error.value = '통합할 업로드를 2개 이상 선택하세요.'
+    if (slice.selectedUploadIds.value.length < 1) {
+      error.value = '다운로드할 업로드를 1개 이상 선택하세요.'
       return
     }
     error.value = ''
@@ -1966,14 +2052,21 @@ function createScopedApi(scope) {
         option: '',
       }).filter((r) => !isReturnRecord(r) && !isEsserSheetTotalRecord(r))
       if (!details.length) {
-        error.value = '통합할 판매 상세 데이터가 없습니다.'
+        error.value = '다운로드할 판매 상세 데이터가 없습니다.'
         return
       }
       const selected = uploads.value.filter((u) =>
         slice.selectedUploadIds.value.includes(u.id),
       )
-      downloadMergedSalesReport(details, mergedFileName(selected))
-      success.value = `${selected.length}개 파일 통합 엑셀을 다운로드했습니다. (${dateRangeLabel(details) || '기간 미상'})`
+      const name = mergedFileName(selected)
+      if (detailsAreClosedMall(details)) {
+        // 기타 판매처 — a상품명·a원가 등 재업로드 가능 양식
+        downloadClosedMallReuploadExcel(details, name.replace(/\.xlsx$/i, '') + '_재업로드.xlsx')
+        success.value = `${selected.length}개 파일 기타 판매처 양식(a열)으로 다운로드했습니다. (${dateRangeLabel(details) || '기간 미상'})`
+      } else {
+        downloadMergedSalesReport(details, name)
+        success.value = `${selected.length}개 파일 엑셀을 다운로드했습니다. (${dateRangeLabel(details) || '기간 미상'})`
+      }
     } catch (e) {
       error.value = `엑셀 다운로드 실패: ${e.message}`
     } finally {
@@ -2049,6 +2142,7 @@ function createScopedApi(scope) {
     uploadsByKind,
     uploadSalesMethod,
     ensureLoaded,
+    ensureCoreLoaded,
     ensureDashboardReady,
     schedulePrefetchDashboardKpis,
     ensureDetailCache,
@@ -2094,7 +2188,25 @@ watch(
     return keys
       .map((s) => {
         const store = getSpecialSaleReactiveStore(s)
-        return `${JSON.stringify(store.months)}|${JSON.stringify(store.legacyEntries)}`
+        return `${JSON.stringify(store.months)}|${JSON.stringify(store.weeks)}|${JSON.stringify(store.legacyEntries)}`
+      })
+      .join('||')
+  },
+  () => {
+    for (const scope of allDataScopes()) {
+      if (!isCombinedScope(scope) || !isMonthlyScope(scope)) continue
+      reapplyDirectInputKpiMergesForScope(scope)
+    }
+  },
+)
+
+watch(
+  () => {
+    const keys = ['combined_daily', 'combined_monthly']
+    return keys
+      .map((s) => {
+        const store = getManualExpenseReactiveStore(s)
+        return `${JSON.stringify(store.months)}|${JSON.stringify(store.weeks)}|${JSON.stringify(store.legacyEntries)}`
       })
       .join('||')
   },

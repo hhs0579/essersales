@@ -112,12 +112,29 @@ export function manualAdSourceLabel(source) {
 
 
 
+/**
+ * KPI/엑셀 행 라벨 — 브랜드 접두 (예: 베스트하임-Meta)
+ * @param {string} [brandLabel]
+ * @param {string} [platformKpiLabel]
+ */
+export function formatExternalAdKpiLabel(brandLabel, platformKpiLabel) {
+  const brand = String(brandLabel || '').trim()
+  const platform = String(platformKpiLabel || '').trim()
+  if (!platform) return brand
+  if (!brand || brand === '통합' || brand === '외부 광고') return platform
+  return `${brand}-${platform}`
+}
+
 /** @param {string} label */
-
 export function isManualAdKpiLabel(label) {
-
-  return MANUAL_AD_KPI_LABELS.includes(String(label || '').trim())
-
+  const s = String(label || '').trim()
+  if (!s) return false
+  if (MANUAL_AD_KPI_LABELS.includes(s)) return true
+  // 브랜드 접두: 베스트하임-Meta, 사본느리-구글 트래픽 등
+  for (const kpi of MANUAL_AD_KPI_LABELS) {
+    if (s.endsWith(`-${kpi}`) && s.length > kpi.length + 1) return true
+  }
+  return false
 }
 
 

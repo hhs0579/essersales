@@ -35,6 +35,7 @@ const {
   importSalesExcelFile,
   removeSalesSourceFile,
   reapplyAllSalesSourceFiles,
+  downloadSalesSourceFile,
   salesCountForSource,
   saveStore,
 } = useOwnMallManual()
@@ -49,6 +50,7 @@ const salesImportMsg = ref('')
 const salesImportErr = ref('')
 const salesImporting = ref(false)
 const removingSourceId = ref('')
+const downloadingSourceId = ref('')
 const reapplyingSources = ref(false)
 const previewProductId = ref('')
 
@@ -225,6 +227,21 @@ async function onRemoveSourceFile(file) {
     saveErr.value = e?.message || '파일 삭제에 실패했습니다.'
   } finally {
     removingSourceId.value = ''
+  }
+}
+
+async function onDownloadSourceFile(file) {
+  if (!file?.id || downloadingSourceId.value) return
+  downloadingSourceId.value = file.id
+  saveMsg.value = ''
+  saveErr.value = ''
+  try {
+    const res = await downloadSalesSourceFile(file.id)
+    saveMsg.value = `「${res.fileName || file.fileName}」 원본 다운로드를 시작했습니다.`
+  } catch (e) {
+    saveErr.value = e?.message || '원본 다운로드에 실패했습니다.'
+  } finally {
+    downloadingSourceId.value = ''
   }
 }
 
@@ -477,6 +494,15 @@ function productPreviewText(product) {
               <span v-if="file.uploadedAtLabel" class="source-tag">{{ file.uploadedAtLabel }}</span>
               <span class="source-tag source-tag-ok">판매 {{ file.saleCount }}건</span>
             </div>
+            <button
+              type="button"
+              class="btn btn-outline btn-sm"
+              :disabled="downloadingSourceId === file.id || removingSourceId === file.id"
+              title="서버에 저장된 판매 엑셀 원본"
+              @click="onDownloadSourceFile(file)"
+            >
+              {{ downloadingSourceId === file.id ? '받는 중…' : '원본 받기' }}
+            </button>
             <button
               type="button"
               class="btn btn-outline btn-sm btn-danger-outline"

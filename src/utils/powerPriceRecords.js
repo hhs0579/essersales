@@ -1,8 +1,10 @@
 import { parseAmount } from './parseAmount.js'
 import {
   POWER_PRICE_UPLOAD_KIND,
+  POWER_PRICE_CONFIRM_UPLOAD_KIND,
   POWER_PRICE_SCOPE,
   POWER_PRICE_PLATFORM_FEE_RATE,
+  powerPriceCostKey,
 } from '../config/powerPrice.js'
 
 /** @param {number} salesAmt */
@@ -13,13 +15,50 @@ export function calcPowerPricePlatformFee(salesAmt) {
 }
 
 /**
+ * @param {import('../config/powerPrice.js').PowerPriceConfirmLine} line
+ * @param {Map<string, import('../config/powerPrice.js').PowerPriceCostMasterEntry>} costMap
+ */
+export function calcPowerPriceConfirmLine(line, costMap) {
+  const qty = Math.max(1, parseAmount(line?.quantity) || 1)
+  const sales = Math.round(parseAmount(line?.orderAmount) || 0)
+  const feeNpay = Math.abs(Math.round(parseAmount(line?.feeNpay) || 0))
+  const feeSales = Math.abs(Math.round(parseAmount(line?.feeSales) || 0))
+  const platformFee = feeNpay + feeSales
+  const key = line?.costKey || powerPriceCostKey(line?.productId, line?.option)
+  const unitCost = parseAmount(costMap?.get?.(key)?.unitCost)
+  const totalCost = Math.round(unitCost * qty)
+  const netProfit = sales - platformFee - totalCost
+  return {
+    sales,
+    platformFee,
+    unitCost,
+    totalCost,
+    netProfit,
+    qty,
+    costKey: key,
+    missingCost: !unitCost,
+  }
+}
+
+/**
  * @param {import('../config/powerPrice.js').PowerPriceProduct[]} products
  * @param {import('../config/powerPrice.js').PowerPriceSaleEntry[]} sales
+ * @param {import('../config/powerPrice.js').PowerPriceConfirmLine[]} [confirmLines]
+ * @param {import('../config/powerPrice.js').PowerPriceCostMasterEntry[]} [costMaster]
  */
-export function buildPowerPriceDetailRows(products, sales) {
+export function buildPowerPriceDetailRows(
+  products,
+  sales,
+  confirmLines = [],
+  costMaster = [],
+) {
   /** @type {Map<string, import('../config/powerPrice.js').PowerPriceProduct>} */
   const productMap = new Map(
     (products || []).filter((p) => p?.id).map((p) => [p.id, p]),
+  )
+  /** @type {Map<string, import('../config/powerPrice.js').PowerPriceCostMasterEntry>} */
+  const costMap = new Map(
+    (costMaster || []).filter((c) => c?.key).map((c) => [c.key, c]),
   )
   const rows = []
 
@@ -54,6 +93,46 @@ export function buildPowerPriceDetailRows(products, sales) {
       adSpend: '',
       adSales: '',
       sourceFileName: '파워프라이스 직접입력',
+    })
+  }
+
+  for (const entry of confirmLines || []) {
+    if (!entry?.date || !entry.productId) continue
+    const calc = calcPowerPriceConfirmLine(entry, costMap)
+    if (!calc.sales) continue
+    const optionLabel = String(entry.option || '').trim()
+    const productLabel = optionLabel
+      ? `${entry.productName || entry.productId} / ${optionLabel}`
+      : entry.productName || entry.productId
+
+    rows.push({
+      id: `pp-confirm-${entry.id || entry.productOrderId}`,
+      uploadId: POWER_PRICE_CONFIRM_UPLOAD_KIND,
+      uploadKind: POWER_PRICE_CONFIRM_UPLOAD_KIND,
+      uploadFormat: 'power_price_confirm',
+      scope: POWER_PRICE_SCOPE,
+      date: entry.date,
+      platform: '스마트스토어',
+      channel: '스마트스토어',
+      salesMethod: '',
+      brand: '파워프라이스',
+      productName: productLabel,
+      productId: entry.productId,
+      option: optionLabel,
+      sales: String(calc.sales),
+      salesQty: String(calc.qty),
+      salePrice: '',
+      optionPrice: '',
+      unitCost: calc.unitCost ? String(Math.round(calc.unitCost)) : '',
+      totalCost: String(calc.totalCost),
+      channelFee: String(calc.platformFee),
+      netProfit: String(calc.netProfit),
+      marginRate: calc.sales > 0 ? `${((calc.netProfit / calc.sales) * 100).toFixed(2)}%` : '',
+      adSpend: '',
+      adSales: '',
+      sourceFileName: entry.sourceFileName || '구매확정내역',
+      settleAmount: entry.settleAmount || '',
+      missingCost: calc.missingCost,
     })
   }
 

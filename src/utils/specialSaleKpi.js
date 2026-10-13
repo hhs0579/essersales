@@ -170,9 +170,32 @@ export function buildSpecialSaleKpiRowForEntry(entry) {
   return { label: specialSaleEntryLabel(entry), profit, ad, rowCount: '', kind: 'special_sale' }
 }
 
+/**
+ * 같은 이름(라벨) 특판 entries를 하나로 합산 — 월별에 주차 입력이 여러 번 들어와도 행 중복·누락 없음
+ * @param {{ entries?: unknown[] } | null | undefined} data
+ * @returns {Array<{ name: string, sales: string, margin: string }>}
+ */
+export function mergeSpecialSaleEntriesByLabel(data) {
+  /** @type {Map<string, { name: string, sales: number, margin: number }>} */
+  const byLabel = new Map()
+  for (const entry of getSpecialSaleEntries(data)) {
+    if (!hasSpecialSaleEntryInput(entry)) continue
+    const label = specialSaleEntryLabel(entry)
+    const acc = byLabel.get(label) || { name: label, sales: 0, margin: 0 }
+    acc.sales += parseAmount(entry.sales) || 0
+    acc.margin += parseAmount(entry.margin) || 0
+    byLabel.set(label, acc)
+  }
+  return [...byLabel.values()].map((acc) => ({
+    name: acc.name,
+    sales: String(acc.sales),
+    margin: String(acc.margin),
+  }))
+}
+
 /** @param {{ entries?: unknown[] } | null | undefined} data */
 export function buildSpecialSaleKpiRows(data) {
-  return getSpecialSaleEntries(data)
+  return mergeSpecialSaleEntriesByLabel(data)
     .map((entry) => buildSpecialSaleKpiRowForEntry(entry))
     .filter(Boolean)
 }
@@ -217,13 +240,25 @@ export function collectSpecialSaleRowLabelsFromMonthlyMap(monthlyMap) {
 /**
  * app_settings special_sale raw → 해당 월 { entries }
  * 월 키가 비면 months 중 최신 월. 지정 월이 없으면 빈 entries.
+ * opts.dateFrom/dateTo가 달 전체가 아니면 월 버킷 제외, 겹치는 주차만 포함.
  * @param {unknown} raw
  * @param {string} [monthKey]
+ * @param {{ dateFrom?: string, dateTo?: string }} [opts]
  * @returns {{ entries: ReturnType<typeof normalizeSpecialSaleEntry>[] } | null}
  */
-export function pickSpecialSaleSettingForMonth(raw, monthKey = '') {
+export function pickSpecialSaleSettingForMonth(raw, monthKey = '', opts = {}) {
   if (!raw || typeof raw !== 'object') return null
   const o = /** @type {Record<string, unknown>} */ (raw)
+  const from = String(opts.dateFrom || '').trim()
+  const to = String(opts.dateTo || '').trim()
+  const partialRange =
+    /^\d{4}-\d{2}-\d{2}$/.test(from) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(to) &&
+    !isFullCalendarMonthRange(from, to)
+  const weekRange = partialRange ? { from, to } : null
+
+  /** @type {ReturnType<typeof normalizeSpecialSaleEntry>[]} */
+  let entries = []
 
   if (o.months && typeof o.months === 'object') {
     const months = /** @type {Record<string, unknown>} */ (o.months)
@@ -236,17 +271,29 @@ export function pickSpecialSaleSettingForMonth(raw, monthKey = '') {
     }
     const pickKey = paddedWanted || Object.keys(byPadded).sort().pop() || ''
     const bucket = pickKey ? byPadded[pickKey] : null
-    if (!bucket || typeof bucket !== 'object') return { entries: [] }
-    const entries = getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
-      normalizeSpecialSaleEntry,
-    )
+    if (!partialRange && bucket && typeof bucket === 'object') {
+      entries = getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+        normalizeSpecialSaleEntry,
+      )
+    }
+    const mkForWeeks = pickKey || paddedWanted
+    if (mkForWeeks) {
+      entries = [...entries, ...collectWeekEntriesFromRaw(o.weeks, mkForWeeks, weekRange)]
+    }
     return { entries }
   }
 
   if (Array.isArray(o.entries) && o.entries.length) {
-    return { entries: o.entries.map((e) => normalizeSpecialSaleEntry(/** @type {Record<string, unknown>} */ (e))) }
+    if (!partialRange) {
+      entries = o.entries.map((e) =>
+        normalizeSpecialSaleEntry(/** @type {Record<string, unknown>} */ (e)),
+      )
+    }
+    const mk = padMonthKey(monthKey)
+    if (mk) entries = [...entries, ...collectWeekEntriesFromRaw(o.weeks, mk, weekRange)]
+    return { entries }
   }
-  if (o.totalSales || o.margin || o.marginRate) {
+  if (!partialRange && (o.totalSales || o.margin || o.marginRate)) {
     return {
       entries: [
         normalizeSpecialSaleEntry({
@@ -257,7 +304,94 @@ export function pickSpecialSaleSettingForMonth(raw, monthKey = '') {
       ],
     }
   }
+  const mk = padMonthKey(monthKey)
+  if (mk && o.weeks) {
+    return { entries: collectWeekEntriesFromRaw(o.weeks, mk, weekRange) }
+  }
   return null
+}
+
+function isFullCalendarMonthRange(from, to) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return false
+  if (from.slice(0, 7) !== to.slice(0, 7)) return false
+  const y = Number(from.slice(0, 4))
+  const m = Number(from.slice(5, 7))
+  const last = new Date(y, m, 0).getDate()
+  return from.endsWith('-01') && to === `${from.slice(0, 7)}-${String(last).padStart(2, '0')}`
+}
+
+/** @param {unknown} weeksRaw @param {string} monthKey @param {{ from: string, to: string } | null} [range] */
+function collectWeekEntriesFromRaw(weeksRaw, monthKey, range = null) {
+  if (!weeksRaw || typeof weeksRaw !== 'object') return []
+  const mk = padMonthKey(monthKey)
+  if (!mk) return []
+  const weeks = /** @type {Record<string, unknown>} */ (weeksRaw)
+  const keys = Object.keys(weeks)
+    .filter((wk) => wk.startsWith(`${mk}-W`) && /^\d{4}-\d{2}-W[1-6]$/.test(wk))
+    .sort()
+  /** @type {ReturnType<typeof normalizeSpecialSaleEntry>[]} */
+  const out = []
+  for (const wk of keys) {
+    const bucket = weeks[wk]
+    if (!bucket || typeof bucket !== 'object') continue
+    if (range) {
+      const b = /** @type {Record<string, unknown>} */ (bucket)
+      const wf = String(b.from || '').trim()
+      const wt = String(b.to || '').trim()
+      if (/^\d{4}-\d{2}-\d{2}$/.test(wf) && /^\d{4}-\d{2}-\d{2}$/.test(wt)) {
+        if (wt < range.from || wf > range.to) continue
+      }
+    }
+    out.push(
+      ...getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+        normalizeSpecialSaleEntry,
+      ),
+    )
+  }
+  return out
+}
+
+const FRI_THU_WEEK_KEY_RE = /^\d{4}-\d{2}-W[1-6]$/
+
+/**
+ * app_settings special_sale raw → 해당 금~목 주차 { entries }
+ * @param {unknown} raw
+ * @param {string} [weekKey] YYYY-MM-Wn
+ */
+export function pickSpecialSaleSettingForWeek(raw, weekKey = '') {
+  const wk = String(weekKey || '').trim()
+  if (!FRI_THU_WEEK_KEY_RE.test(wk)) return null
+  if (!raw || typeof raw !== 'object') return { entries: [] }
+  const o = /** @type {Record<string, unknown>} */ (raw)
+  const weeks =
+    o.weeks && typeof o.weeks === 'object'
+      ? /** @type {Record<string, unknown>} */ (o.weeks)
+      : {}
+  const bucket = weeks[wk]
+  if (!bucket || typeof bucket !== 'object') return { entries: [] }
+  const entries = getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+    normalizeSpecialSaleEntry,
+  )
+  return { entries }
+}
+
+function ingestSpecialSaleWeeks(target, raw) {
+  if (!raw || typeof raw !== 'object') return
+  const o = /** @type {Record<string, unknown>} */ (raw)
+  if (!o.weeks || typeof o.weeks !== 'object') return
+  for (const [wk, bucket] of Object.entries(/** @type {Record<string, unknown>} */ (o.weeks))) {
+    if (!FRI_THU_WEEK_KEY_RE.test(wk)) continue
+    if (!bucket || typeof bucket !== 'object') continue
+    const b = /** @type {Record<string, unknown>} */ (bucket)
+    const entries = getSpecialSaleEntries(Array.isArray(bucket) ? { entries: bucket } : bucket).map(
+      normalizeSpecialSaleEntry,
+    )
+    target[wk] = {
+      from: typeof b.from === 'string' ? b.from : '',
+      to: typeof b.to === 'string' ? b.to : '',
+      entries,
+    }
+  }
 }
 
 function ingestSpecialSaleMonths(target, raw, monthKey = '') {
@@ -297,5 +431,9 @@ export function mergeSpecialSaleSettingRaw(dbRaw, overrideRaw, monthKey = '') {
   const months = {}
   ingestSpecialSaleMonths(months, dbRaw, monthKey)
   ingestSpecialSaleMonths(months, overrideRaw, monthKey)
-  return { months }
+  /** @type {Record<string, { from?: string, to?: string, entries: ReturnType<typeof normalizeSpecialSaleEntry>[] }>} */
+  const weeks = {}
+  ingestSpecialSaleWeeks(weeks, dbRaw)
+  ingestSpecialSaleWeeks(weeks, overrideRaw)
+  return { version: 2, months, weeks }
 }

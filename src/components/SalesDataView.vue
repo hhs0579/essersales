@@ -3,6 +3,7 @@ import {
   computed,
   defineAsyncComponent,
   onActivated,
+  onDeactivated,
   onMounted,
   onUnmounted,
   ref,
@@ -54,9 +55,16 @@ import { ownMallManualDetailRecords } from '../composables/useOwnMallManual.js'
 import { powerPriceDetailRecords } from '../composables/usePowerPrice.js'
 import { coupang1pRocketDetailRecords } from '../composables/useCoupang1pRocket.js'
 import { mergeDashboardManualInputRecords } from '../utils/dashboardKpiRecords.js'
-import { getSpecialSaleSnapshot, getSpecialSaleMonthlyMap, getSpecialSaleReactiveStore, hydrateSpecialSaleForScope } from '../composables/useSpecialSale.js'
+import {
+  getSpecialSaleSnapshot,
+  getSpecialSaleWeekSnapshot,
+  getSpecialSaleMonthlyMap,
+  getSpecialSaleReactiveStore,
+  hydrateSpecialSaleForScope,
+} from '../composables/useSpecialSale.js'
 import {
   getManualExpenseSnapshot,
+  getManualExpenseWeekSnapshot,
   getManualExpenseReactiveStore,
   hydrateManualExpenseForScope,
 } from '../composables/useManualExpense.js'
@@ -66,6 +74,12 @@ import {
   resolveReferenceMonthKey,
   addMonthsToMonthKey,
 } from '../utils/dayOverDaySales.js'
+import {
+  getWeeksForMonth,
+  hasCustomWeekPeriods,
+  hydrateWeekPeriods,
+} from '../composables/useWeekPeriods.js'
+import WeekPeriodEditor from './WeekPeriodEditor.vue'
 import { findExternalAdChannelByScope } from '../config/externalAdChannels.js'
 import { PLATFORM_OPTIONS } from '../constants/platforms.js'
 import { salesMethodOptionsForPlatform } from '../constants/salesMethods.js'
@@ -75,6 +89,8 @@ import { UI_BUILD_ID } from '../constants/appVersion.js'
 const props = defineProps({
   /** @type {'platform' | 'company_b' | 'sales_report'} */
   scope: { type: String, required: true },
+  /** 대시보드 모드: daily | weekly | monthly */
+  reportMode: { type: String, default: '' },
 })
 
 const isCombined = computed(() => isCombinedScope(props.scope))
@@ -86,7 +102,12 @@ const isOtherSellersScope = computed(() => isOtherSellersScopeFn(props.scope))
 const isManualInputScope = computed(() => isPowerPriceScope.value || isCoupang1pScope.value)
 const coupang1pBrandKey = ref('bestheim')
 const isMonthlyEsserScope = computed(() => isMonthlyScope(props.scope))
-const isDailyEsserScope = computed(() => usesEsserDashboard(props.scope) && !isMonthlyEsserScope.value)
+const isWeeklyReport = computed(
+  () => isCombined.value && !isMonthlyEsserScope.value && props.reportMode === 'weekly',
+)
+const isDailyEsserScope = computed(
+  () => usesEsserDashboard(props.scope) && !isMonthlyEsserScope.value && !isWeeklyReport.value,
+)
 const isEsserScope = computed(() => usesEsserDashboard(props.scope) || isMonthlyEsserScope.value)
 const isPlatformScope = computed(() => isEsserScope.value && !isManualInputScope.value)
 
@@ -491,7 +512,137 @@ const specialSaleMonthKey = computed(() => {
   return resolveReferenceMonthKey(scopedSaleDetails.value, { period: 'monthly' }) || ''
 })
 
+/** 주간 통합 — 기준 연월·주차 */
+const weeklyMonthKey = ref('')
+const activeWeekIndex = ref(1)
+
+const weeklyYear = computed({
+  get: () => {
+    const mk = weeklyMonthKey.value
+    return /^\d{4}-\d{2}$/.test(mk) ? mk.slice(0, 4) : String(new Date().getFullYear())
+  },
+  set: (y) => {
+    const mo = weeklyMonth.value || String(new Date().getMonth() + 1)
+    weeklyMonthKey.value = `${y}-${String(mo).padStart(2, '0')}`
+  },
+})
+
+const weeklyMonth = computed({
+  get: () => {
+    const mk = weeklyMonthKey.value
+    return /^\d{4}-\d{2}$/.test(mk) ? String(Number(mk.slice(5, 7))) : String(new Date().getMonth() + 1)
+  },
+  set: (mo) => {
+    const y = weeklyYear.value || String(new Date().getFullYear())
+    weeklyMonthKey.value = `${y}-${String(mo).padStart(2, '0')}`
+  },
+})
+
+function initWeeklyMonthKey() {
+  const fromFilters = specialSaleMonthKey.value
+  if (/^\d{4}-\d{2}$/.test(fromFilters)) {
+    weeklyMonthKey.value = fromFilters
+    return
+  }
+  const d = new Date()
+  weeklyMonthKey.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+const friThuWeeks = computed(() => getWeeksForMonth(weeklyMonthKey.value))
+
+const activeFriThuWeek = computed(() => {
+  const list = friThuWeeks.value
+  if (!list.length) return null
+  return list.find((w) => w.weekIndex === activeWeekIndex.value) || list[0]
+})
+
+function applyActiveWeekToFilters() {
+  const w = activeFriThuWeek.value
+  if (!w || !isWeeklyReport.value) return
+  applyingMonthPreset = true
+  filters.value.dateFrom = w.from
+  filters.value.dateTo = w.to
+  // 직접 설정한 주차가 두 달에 걸치면(예: 9/30~10/6) 연·월 필터가 앞쪽 날짜를 지우므로 비움
+  const sameMonth = w.from.slice(0, 7) === w.to.slice(0, 7)
+  filters.value.year = sameMonth ? w.from.slice(0, 4) : ''
+  filters.value.month = sameMonth ? String(Number(w.from.slice(5, 7))) : ''
+  filters.value.friThuWeekKey = w.weekKey
+  applyingMonthPreset = false
+}
+
+function selectFriThuWeek(weekIndex) {
+  activeWeekIndex.value = weekIndex
+  applyActiveWeekToFilters()
+}
+
+/** 주차 기간 편집 패널 */
+const weekPeriodEditorOpen = ref(false)
+
+function onWeekPeriodsSaved() {
+  weekPeriodEditorOpen.value = false
+  if (!friThuWeeks.value.some((w) => w.weekIndex === activeWeekIndex.value)) {
+    activeWeekIndex.value = friThuWeeks.value[0]?.weekIndex || 1
+  }
+  applyActiveWeekToFilters()
+}
+
+function onWeeklyManualSaved() {
+  applyLightDashboardMeta()
+  reloadServerKpiImmediate()
+  syncDashboardKpiSnapshot()
+}
+
+watch(
+  () => isWeeklyReport.value,
+  (on) => {
+    if (!on) {
+      if (filters.value.friThuWeekKey) filters.value.friThuWeekKey = ''
+      return
+    }
+    initWeeklyMonthKey()
+    if (!friThuWeeks.value.some((w) => w.weekIndex === activeWeekIndex.value)) {
+      activeWeekIndex.value = friThuWeeks.value[0]?.weekIndex || 1
+    }
+    applyActiveWeekToFilters()
+    hydrateWeekPeriods({ forceRefresh: true }).catch(() => {})
+    hydrateSpecialSaleForScope(props.scope, { forceRefresh: true }).catch(() => {})
+    hydrateManualExpenseForScope(props.scope, { forceRefresh: true }).catch(() => {})
+  },
+  { immediate: true },
+)
+
+// 저장된 주차 기간이 늦게 로드·변경되면 현재 주차 기간도 다시 맞춤
+watch(
+  () => friThuWeeks.value.map((w) => `${w.weekKey}:${w.from}~${w.to}`).join('|'),
+  () => {
+    if (!isWeeklyReport.value) return
+    if (!friThuWeeks.value.some((w) => w.weekIndex === activeWeekIndex.value)) {
+      activeWeekIndex.value = friThuWeeks.value[0]?.weekIndex || 1
+    }
+    applyActiveWeekToFilters()
+  },
+)
+
+watch(weeklyMonthKey, () => {
+  if (!isWeeklyReport.value) return
+  if (!friThuWeeks.value.some((w) => w.weekIndex === activeWeekIndex.value)) {
+    activeWeekIndex.value = friThuWeeks.value[0]?.weekIndex || 1
+  }
+  applyActiveWeekToFilters()
+})
+
 function buildSpecialSaleContext() {
+  if (isWeeklyReport.value) {
+    const w = activeFriThuWeek.value
+    const wk = w?.weekKey || ''
+    return {
+      specialSale: wk ? getSpecialSaleWeekSnapshot(props.scope, wk) : { entries: [] },
+      specialSalePrev: null,
+      specialSaleByMonth: null,
+      specialSaleRowLabels: [],
+      manualExpense: wk ? getManualExpenseWeekSnapshot(props.scope, wk) : { entries: [] },
+    }
+  }
   if (!isCombined.value || !isMonthlyEsserScope.value) {
     return {
       specialSale: null,
@@ -504,15 +655,19 @@ function buildSpecialSaleContext() {
   const mk = specialSaleMonthKey.value
   const monthlyMap = getSpecialSaleMonthlyMap(props.scope, mk)
   const prevMk = mk ? addMonthsToMonthKey(mk, -1) : ''
+  const rangeOpts = {
+    dateFrom: filters.value.dateFrom,
+    dateTo: filters.value.dateTo,
+  }
   return {
-    specialSale: getSpecialSaleSnapshot(props.scope, mk),
+    specialSale: getSpecialSaleSnapshot(props.scope, mk, rangeOpts),
     specialSalePrev: prevMk
       ? getSpecialSaleSnapshot(props.scope, prevMk, { allowLegacy: false })
       : { entries: [] },
     specialSaleByMonth: buildSpecialSaleMonthlyTotals(monthlyMap),
     specialSaleMonthlyMap: monthlyMap,
     specialSaleRowLabels: [...collectSpecialSaleRowLabelsFromMonthlyMap(monthlyMap)],
-    manualExpense: getManualExpenseSnapshot(props.scope, mk),
+    manualExpense: getManualExpenseSnapshot(props.scope, mk, rangeOpts),
   }
 }
 
@@ -660,13 +815,19 @@ watch(
 /** 특판·수기 지출 hydrate·저장 후 KPI 즉시 반영 */
 watch(
   () => {
-    if (!isCombined.value || !isMonthlyEsserScope.value) return ''
+    if (!isCombined.value) return ''
     const ss = getSpecialSaleReactiveStore(props.scope)
     const me = getManualExpenseReactiveStore(props.scope)
-    return `${specialSaleMonthKey.value}|ss:${JSON.stringify(ss.months)}|me:${JSON.stringify(me.months)}`
+    if (isWeeklyReport.value) {
+      const wk = activeFriThuWeek.value?.weekKey || ''
+      return `week:${wk}|ss:${JSON.stringify(ss.weeks?.[wk] || null)}|me:${JSON.stringify(me.weeks?.[wk] || null)}`
+    }
+    if (!isMonthlyEsserScope.value) return ''
+    return `${specialSaleMonthKey.value}|ss:${JSON.stringify(ss.months)}|ssw:${JSON.stringify(ss.weeks)}|me:${JSON.stringify(me.months)}|mew:${JSON.stringify(me.weeks)}`
   },
   () => {
     applyLightDashboardMeta()
+    if (isWeeklyReport.value) reloadServerKpiImmediate()
   },
 )
 
@@ -751,8 +912,45 @@ onMounted(async () => {
   didMountBootstrap.value = true
 })
 
+/**
+ * 통합 일별·주간은 같은 scope(필터 slice)를 공유하는 별도 KeepAlive 인스턴스.
+ * 재방문 시 자기 모드의 기간으로 되돌려 주차 필터가 일별로 새지 않게 함.
+ */
+let dailyPeriodSnapshot = null
+
+function isCombinedDailyView() {
+  return isCombined.value && !isMonthlyEsserScope.value && !isWeeklyReport.value
+}
+
+function realignSharedPeriodFilters() {
+  if (isWeeklyReport.value) {
+    applyActiveWeekToFilters()
+    return
+  }
+  if (!isCombinedDailyView()) return
+  if (filters.value.friThuWeekKey) filters.value.friThuWeekKey = ''
+  const snap = dailyPeriodSnapshot
+  if (!snap) return
+  const f = filters.value
+  if (f.dateFrom === snap.dateFrom && f.dateTo === snap.dateTo && f.year === snap.year && String(f.month) === String(snap.month)) return
+  applyingMonthPreset = true
+  f.dateFrom = snap.dateFrom
+  f.dateTo = snap.dateTo
+  f.year = snap.year
+  f.month = snap.month
+  applyingMonthPreset = false
+}
+
+onDeactivated(() => {
+  if (!isCombinedDailyView()) return
+  const f = filters.value
+  dailyPeriodSnapshot = { dateFrom: f.dateFrom, dateTo: f.dateTo, year: f.year, month: f.month }
+})
+
 onActivated(() => {
-  if (!usesServerKpiMode.value || !didMountBootstrap.value) return
+  if (!didMountBootstrap.value) return
+  realignSharedPeriodFilters()
+  if (!usesServerKpiMode.value) return
   void ensureDashboardReady(props.scope)
 })
 
@@ -888,7 +1086,71 @@ const monthlyYearOptions = computed(() => {
 
 <template>
   <CollapsibleSection title="조회 조건" card-class="filters-panel">
-    <div v-if="isMonthlyEsserScope" class="filters-month-block">
+    <div v-if="isWeeklyReport" class="filters-month-block filters-weekly-block">
+      <div class="filters-month-row">
+        <label class="filter-field">
+          <span class="field-label">연도</span>
+          <select v-model="weeklyYear" class="filter-select">
+            <option v-for="y in monthlyYearOptions" :key="y" :value="String(y)">{{ y }}년</option>
+          </select>
+        </label>
+        <label class="filter-field">
+          <span class="field-label">월</span>
+          <select v-model="weeklyMonth" class="filter-select">
+            <option v-for="m in monthOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
+          </select>
+        </label>
+        <span class="month-only-hint">
+          {{ hasCustomWeekPeriods(weeklyMonthKey) ? '직접 설정한 주차 기간' : '금~목 주차(자동)' }}.
+          탭을 누르면 조회 기간이 해당 주로 맞춰집니다.
+        </span>
+        <button
+          type="button"
+          class="btn-reset-week-range"
+          @click="weekPeriodEditorOpen = !weekPeriodEditorOpen"
+        >
+          주차 기간 설정
+        </button>
+      </div>
+      <div class="week-tabs" role="tablist" aria-label="금~목 주차">
+        <button
+          v-for="w in friThuWeeks"
+          :key="w.weekKey"
+          type="button"
+          class="week-tab"
+          :class="{ active: activeWeekIndex === w.weekIndex }"
+          role="tab"
+          :aria-selected="activeWeekIndex === w.weekIndex"
+          @click="selectFriThuWeek(w.weekIndex)"
+        >
+          {{ w.label }}
+        </button>
+      </div>
+      <WeekPeriodEditor
+        v-if="weekPeriodEditorOpen"
+        :month-key="weeklyMonthKey"
+        @saved="onWeekPeriodsSaved"
+        @close="weekPeriodEditorOpen = false"
+      />
+      <div v-if="isCombined && activeFriThuWeek" class="filters-special-sale">
+        <SpecialSalePanel
+          :scope="props.scope"
+          :week-key="activeFriThuWeek.weekKey"
+          :week-from="activeFriThuWeek.from"
+          :week-to="activeFriThuWeek.to"
+          @saved="onWeeklyManualSaved"
+        />
+        <ManualExpensePanel
+          :scope="props.scope"
+          :week-key="activeFriThuWeek.weekKey"
+          :week-from="activeFriThuWeek.from"
+          :week-to="activeFriThuWeek.to"
+          @saved="onWeeklyManualSaved"
+        />
+      </div>
+    </div>
+
+    <div v-else-if="isMonthlyEsserScope" class="filters-month-block">
       <div class="filters-date-block">
         <DatePeriodFilter
           v-model:date-from="filters.dateFrom"
@@ -1383,6 +1645,19 @@ const monthlyYearOptions = computed(() => {
   border: 1px solid #e2e8f0;
 }
 
+.btn-reset-week-range {
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.btn-reset-week-range:hover {
+  background: #f1f5f9;
+}
+
 .filters-month-block {
   display: flex;
   flex-direction: column;
@@ -1406,6 +1681,36 @@ const monthlyYearOptions = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
+}
+
+.week-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.week-tab {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #334155;
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.week-tab:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.week-tab.active {
+  border-color: #2563eb;
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .month-only-hint {
